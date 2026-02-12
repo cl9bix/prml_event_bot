@@ -25,6 +25,7 @@ from telegram.ext import (
 )
 from telegram.constants import ChatAction
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # ================== НАЛАШТУВАННЯ ===================
@@ -55,9 +56,8 @@ MONO_STATEMENT_URL = "https://api.monobank.ua/personal/statement/{account}/{from
 MONO_DAYS_LOOKBACK = int(os.getenv("MONOBANK_DAYS_LOOKBACK", "3"))
 
 # Conversation states
-CHOOSING_EVENT, REG_NAME, REG_AGE, REG_PHONE, REG_EMAIL, ASK_PROMO, ENTER_PROMO, WAITING_PAYMENT, WAITING_GROUP,EVENTS = range(10)
-
-
+CHOOSING_EVENT, REG_NAME, REG_AGE, REG_PHONE, REG_EMAIL, ASK_PROMO, ENTER_PROMO, WAITING_PAYMENT, WAITING_GROUP, EVENTS = range(
+    10)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -93,7 +93,6 @@ def api_get_json(method: str, url: str, **kwargs) -> Dict[str, Any]:
         return {"ok": False, "error": str(e)}
 
 
-
 def check_user(tg_user) -> Dict[str, Any]:
     payload = {
         "tg_id": tg_user.id,
@@ -102,24 +101,30 @@ def check_user(tg_user) -> Dict[str, Any]:
     }
     return api_get_json("POST", API_CHECK_USER, json=payload)
 
-def create_user(payload:dict)-> Dict[str,Any]:
-    return api_get_json("POST",API_CREATE_USER,json=payload)
+
+def create_user(payload: dict) -> Dict[str, Any]:
+    return api_get_json("POST", API_CREATE_USER, json=payload)
+
 
 def get_events() -> Dict[str, Any]:
     return api_get_json("GET", API_EVENTS_LIST)
 
+
 def get_event_details(event_id: int) -> Dict[str, Any]:
-    return api_get_json("GET", API_EVENT_DETAILS,params = {'event_id': event_id})
+    return api_get_json("GET", API_EVENT_DETAILS, params={'event_id': event_id})
 
 
 def create_payment(payload: Dict[str, Any]) -> Dict[str, Any]:
     return api_get_json("POST", API_CREATE_PAYMENT, json=payload)
 
+
 def get_payment_config() -> Dict[str, Any]:
     return api_get_json("GET", API_PAYMENTS_CONFIG)
 
+
 def get_transactions_history() -> Dict[str, Any]:
     return api_get_json("GET", API_PAYMENTS_HISTORY)
+
 
 def check_payment_status(payment_id: int) -> Dict[str, Any]:
     return api_get_json(
@@ -128,13 +133,13 @@ def check_payment_status(payment_id: int) -> Dict[str, Any]:
         params={"payment_id": payment_id}
     )
 
+
 def check_payment_monobank(payment_id: int) -> Dict[str, Any]:
     return api_get_json(
         "GET",
         API_CHECK_PAYMENT,
         params={"payment_id": payment_id}
     )
-
 
 
 def get_ticket(payment_id: int) -> Dict[str, Any]:
@@ -148,8 +153,9 @@ def get_user_tickets(tg_id: int) -> Dict[str, Any]:
 def confirm_monobank_payment(payment_id: int, mono_data: Dict[str, Any]) -> Dict[str, Any]:
     return api_get_json("POST", API_CONFIRM_MONO, json={"payment_id": payment_id, "mono": mono_data})
 
-def get_promo(code:str,event_id:int) -> Dict[str,Any]:
-    return api_get_json("GET",API_GET_PROMO_VALUE,params={'code':code,"event_id":event_id})
+
+def get_promo(code: str, event_id: int) -> Dict[str, Any]:
+    return api_get_json("GET", API_GET_PROMO_VALUE, params={'code': code, "event_id": event_id})
 
 
 async def ask_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -188,8 +194,10 @@ async def promo_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def promo_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = (update.message.text or "").strip().upper()
     context.user_data["promo_code"] = code
-    await update.message.reply_text(f"Прийняв промокод: <code>{code}</code> ✅\nЗараз сформую оплату…", parse_mode="HTML")
+    await update.message.reply_text(f"Прийняв промокод: <code>{code}</code> ✅\nЗараз сформую оплату…",
+                                    parse_mode="HTML")
     return await start_payment_flow(update, context)
+
 
 # ================== MONOBANK HELPERS ===================
 
@@ -200,13 +208,6 @@ def mono_get_accounts() -> Dict[str, Any]:
     resp = requests.get(MONO_CLIENT_INFO_URL, headers=headers, timeout=10)
     resp.raise_for_status()
     return resp.json()
-
-
-
-
-
-
-
 
 
 # ================== UX HELPERS ===================
@@ -228,17 +229,17 @@ def event_price_uah(event: dict) -> int:
 def nice_event_card(event: dict) -> str:
     start_at = event.get("start_at") or ""
     return (
-        f"✨ <b>{event.get('title','Івент')}</b>\n"
-        f"{event.get('welcome_text','')}\n\n"
-        f"💳 Вартість: <b>{event.get('price','—')} грн</b>\n"
+        f"✨ <b>{event.get('title', 'Івент')}</b>\n"
+        f"{event.get('welcome_text', '')}\n\n"
+        f"💳 Вартість: <b>{event.get('price', '—')} грн</b>\n"
         f"{('🗓️ ' + start_at) if start_at else ''}"
     ).strip()
 
 
 async def is_user_in_required_group(
-    context: ContextTypes.DEFAULT_TYPE,
-    group_id: int,
-    user_id: int,
+        context: ContextTypes.DEFAULT_TYPE,
+        group_id: int,
+        user_id: int,
 ) -> bool:
     try:
         member = await context.bot.get_chat_member(group_id, user_id)
@@ -246,6 +247,7 @@ async def is_user_in_required_group(
     except Exception as e:
         logger.warning("get_chat_member failed: group_id=%s user_id=%s err=%s", group_id, user_id, e)
         return False
+
 
 def _extract_user_id(message_or_query, fallback_update: Update | None = None) -> int | None:
     if hasattr(message_or_query, "from_user") and message_or_query.from_user:
@@ -316,14 +318,14 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     tg_id = query.from_user.id
-    user={'tg_id':tg_id,'username':update.effective_user.username}
+    user = {'tg_id': tg_id, 'username': update.effective_user.username}
     user_q = check_user(user)
     if user_q['exists'] is not True:
         return await query.message.reply_text(
             "Ви не зареєструвались!"
-    )
-    kb =[
-        [InlineKeyboardButton('Назад',callback_data='menu')]
+        )
+    kb = [
+        [InlineKeyboardButton('Назад', callback_data='menu')]
     ]
     userName = user_q['user']['full_name']
     userAge = user_q['user']['age']
@@ -337,8 +339,8 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Номер телефону: <b>{userPhone}</b>"
         f"Email: <b>{userEmail}</b>"
         f"username: <b>{userUsername}</b>"
-        
-        f"telegram id: </b>{userTgId}</b>",parse_mode="HTML"
+
+        f"telegram id: </b>{userTgId}</b>", parse_mode="HTML"
     )
 
 
@@ -351,6 +353,7 @@ async def menu_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Мета — якісне комʼюніті та атмосфера."
     )
 
+
 async def menu_values(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -362,8 +365,6 @@ async def menu_values(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Атмосфера\n"
         "• Відповідальність"
     )
-
-
 
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -404,18 +405,18 @@ async def event_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     await query.edit_message_text(nice_event_card(event), parse_mode="HTML")
 
-    await typing(update,0.4)
+    await typing(update, 0.4)
     await query.message.reply_text("✅ Крок 1/3: Івент обрано.\n")
-    await typing(update,0.4)
+    await typing(update, 0.4)
     user = update.effective_user
     is_exsists = check_user(user)
     if is_exsists['exists'] is not True:
-    # if not context.user_data.get("is_registered", False):
+        # if not context.user_data.get("is_registered", False):
         context.user_data["reg_data"] = {}
         context.user_data['reg_data']['username'] = user.username
         context.user_data['reg_data']['tg_id'] = user.id
         await query.message.reply_text("Тепер — міні-реєстрація ")
-        await typing(update,0.5)
+        await typing(update, 0.5)
         await query.message.reply_text("Як тебе звати? 🙂")
 
         return REG_NAME
@@ -426,8 +427,8 @@ async def event_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 # ===== Registration (in memory only) =====
 
 async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    get_user_full_name:str = update.message.text.strip()
-    if len(get_user_full_name.split(' ')) <2:
+    get_user_full_name: str = update.message.text.strip()
+    if len(get_user_full_name.split(' ')) < 2:
         await update.message.reply_text("Введи будь-ласка своє повне ім'я! (приклад: Тарас Шевченко)")
         return REG_NAME
 
@@ -469,19 +470,19 @@ async def reg_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return REG_EMAIL
 
     context.user_data["reg_data"]["email"] = get_email
-    logger.info('Creating user [%s]. with tg_id=%s', context.user_data["reg_data"]["full_name"],update.effective_user.id
+    logger.info('Creating user [%s]. with tg_id=%s', context.user_data["reg_data"]["full_name"],
+                update.effective_user.id
 
-    )
+                )
     try:
         payload = context.user_data["reg_data"]
-        logger.info("Payload data for user==%s",payload)
+        logger.info("Payload data for user==%s", payload)
         is_created = create_user(payload)
         await update.message.reply_text("✅ Крок 1/3 готово. Далі — оплата 💳")
         return await start_payment_flow(update, context)
     except Exception as e:
-        logger.exception('Error by creating user: %s',e)
+        logger.exception('Error by creating user: %s', e)
         await update.message.reply_text("Помилка на сервері,натисніть /start")
-
 
 
 # ===== Payment =====
@@ -501,10 +502,10 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     payload: Dict[str, Any] = {"event_id": event["id"]}
     price = event_price_uah(event)
-    promo_code = context.user_data.get("promo_code",None)
+    promo_code = context.user_data.get("promo_code", None)
     if promo_code is not None:
         payload["promo_code"] = promo_code
-        promo_check = get_promo(code=promo_code,event_id=payload['event_id'])
+        promo_check = get_promo(code=promo_code, event_id=payload['event_id'])
         if not promo_check.get('ok'):
             await update.effective_message.reply_text("Не можу знайти промокод :(\n\nСпробуй ще раз!")
             return ASK_PROMO
@@ -521,9 +522,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "reg_data": reg_data,
         })
     except Exception as e:
-        logger.warning("ERROR by start_payment_flow=%s",e)
-
-
+        logger.warning("ERROR by start_payment_flow=%s", e)
 
     await typing(update, 0.5)
     resp = create_payment(payload)
@@ -539,8 +538,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     invoice = resp.get("invoice") or {}
     invoice_data = invoice.get("invoiceData") or {}
     payment_link = invoice_data.get("pageUrl")
-    logger.info("[EVENT_data]==%s",event)
-
+    logger.info("[EVENT_data]==%s", event)
 
     if provider == "monobank":
         text = (
@@ -553,7 +551,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Вартість конференції: <s>{price} грн</s>  <b>{final_amount} гривень</b>\n"
         )
     else:
-        new_price_value:str = event['new_price_value']
+        new_price_value: str = event['new_price_value']
         text += f"Вартість конференції:\n<b>{price} гривень - {event['original_price_until']}</b>\n<b>{new_price_value.removesuffix('.00')} гривень - {event['new_price_from']}</b>"
 
     text += (
@@ -578,7 +576,6 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return WAITING_PAYMENT
 
 
-
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -600,7 +597,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         if not resp.get("ok"):
             await query.answer(
-                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.",show_alert=True
+                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.", show_alert=True
             )
             return WAITING_PAYMENT
 
@@ -655,7 +652,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return WAITING_PAYMENT
 
-    await query.message.reply_text("Схоже, оплата не пройшла 😕",)
+    await query.message.reply_text("Схоже, оплата не пройшла 😕", )
     context.user_data.pop("promo_code", None)
 
     return ConversationHandler.END
@@ -715,7 +712,6 @@ async def check_payment_backend(query, context: ContextTypes.DEFAULT_TYPE) -> Op
 
     await query.edit_message_text("Оплата підтверджена ✅")
     return True
-
 
 
 # ===== Group gate -> Ticket =====
@@ -876,7 +872,7 @@ async def my_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     await update.message.reply_text("Ось твої останні квитки 🎫")
     for t in tickets[:5]:
-        txt = f"🎟️ <b>{t.get('event_title','Івент')}</b>\nДата: {t.get('event_date','—')}"
+        txt = f"🎟️ <b>{t.get('event_title', 'Івент')}</b>\nДата: {t.get('event_date', '—')}"
         image_url = t.get("image_url")
         if image_url:
             try:
@@ -936,7 +932,7 @@ def main() -> None:
             ],
 
             EVENTS: [
-                CallbackQueryHandler(show_events,pattern=r"^show_events$")
+                CallbackQueryHandler(show_events, pattern=r"^show_events$")
             ],
 
             WAITING_GROUP: [
@@ -956,16 +952,14 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(menu_about, pattern="^menu_about$"))
     application.add_handler(CallbackQueryHandler(menu_values, pattern="^menu_values$"))
     application.add_handler(CallbackQueryHandler(show_events, pattern="^menu_events$"))
-    application.add_handler(CallbackQueryHandler(event_chosen,  pattern = r"^event_\d+$"))
+    application.add_handler(CallbackQueryHandler(event_chosen, pattern=r"^event_\d+$"))
     application.add_handler(CallbackQueryHandler(promo_yes, pattern=r"^promo_yes$"))
-    application.add_handler(CallbackQueryHandler(promo_no,pattern=r"^promo_no$"))
+    application.add_handler(CallbackQueryHandler(promo_no, pattern=r"^promo_no$"))
     application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_payment$"))
     application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^show_events$"))
     application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_group$"))
 
-
-
-    logger.info("BOT SUCCESSFULLY STARTED - %s",time.strftime("%y/%m/%d (%H:%M:%S)"))
+    logger.info("BOT SUCCESSFULLY STARTED - %s", time.strftime("%y/%m/%d (%H:%M:%S)"))
     application.run_polling()
 
 

@@ -77,10 +77,10 @@ jobs:
             docker login -u "${{ secrets.DOCKERHUB_USER }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
             echo "===> Pull newest images"
-            docker compose pull
+            docker-compose pull
 
             echo "===> Up containers"
-            docker compose up -d --remove-orphans
+            docker-compose up -d --remove-orphans
 
             echo "===> Cleanup old images"
             docker image prune -af --filter "until=240h" || true
