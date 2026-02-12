@@ -69,18 +69,14 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           script: |
             set -e
-
-            echo "===> cd to project"
-            cd /root/prml_event_bot
-
             echo "===> Docker login"
-            docker login -u "${{ secrets.DOCKERHUB_USER }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
-
+            echo "***" | docker login -u "***" --password-stdin
+            
             echo "===> Pull newest images"
-            docker-compose pull
-
+            docker-compose -f /root/prml_event_bot/docker-compose.yml pull
+            
             echo "===> Up containers"
-            docker-compose up -d --remove-orphans
-
+            docker-compose -f /root/prml_event_bot/docker-compose.yml up -d --remove-orphans
+            
             echo "===> Cleanup old images"
             docker image prune -af --filter "until=240h" || true
