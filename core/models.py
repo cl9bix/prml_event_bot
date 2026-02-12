@@ -7,9 +7,8 @@ from django.utils import timezone
 class TgUser(models.Model):
     tg_id = models.BigIntegerField(unique=True)
     username = models.CharField(max_length=255, blank=True, null=True)
-    first_name = models.CharField(max_length=255, blank=True, null=True)
-    last_name = models.CharField(max_length=255, blank=True, null=True)
-
+    # first_name = models.CharField(max_length=255, blank=True, null=True)
+    # last_name = models.CharField(max_length=255, blank=True, null=True)
     full_name = models.CharField(max_length=255)
     age = models.PositiveIntegerField(null=True, blank=True)
     phone = models.CharField(max_length=50)
@@ -31,7 +30,9 @@ class Event(models.Model):
     banner_image = models.ImageField(upload_to="event_banners/")
     ticket_template = models.ImageField(upload_to="ticket_templates/")
     price = models.DecimalField(max_digits=10, decimal_places=2)
-
+    original_price_until = models.CharField(help_text='до 28 лютого')
+    new_price_from = models.CharField(help_text='з 1 березня',default=' ')
+    new_price_value = models.DecimalField(max_digits=10,decimal_places=2,help_text='нова ціна,її треба вручну поставити в "price"')
     is_active = models.BooleanField(default=True)
     start_at = models.DateTimeField()
     end_at = models.DateTimeField()
@@ -39,7 +40,6 @@ class Event(models.Model):
     required_group_id = models.BigIntegerField()
     required_group_invite_link = models.CharField(max_length=512)
 
-    # 👉 куди шлемо авто-повідомлення
     announce_chat_id = models.BigIntegerField(null=True, blank=True)
 
     def __str__(self):
@@ -120,7 +120,7 @@ class Payment(models.Model):
     promo_code = models.ForeignKey("PromoCode", null=True, blank=True, on_delete=models.SET_NULL)
     discount_percent = models.PositiveIntegerField(default=0)
     original_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-
+    last_provider_sync_at = models.DateTimeField(null=True, blank=True)
     def __str__(self):
         return f"Payment #{self.id} ({self.status})"
 

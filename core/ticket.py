@@ -1,89 +1,91 @@
-import uuid
-from io import BytesIO
-from pathlib import Path
+from __future__ import annotations
 
-from django.conf import settings
-from django.core.files.base import ContentFile
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-from core.models import Ticket, Event, TgUser, Payment
+# Підправ за потреби (шляхи/координати/шрифти)
+TEMPLATE_PATH = Path("media/templates/ticket_template.png")
 
-DEFAULT_TEMPLATE_REL = "templates/ex.png"  # file must exist: MEDIA_ROOT/templates/ex.png
+FONT_BOLD = "static/Unbounded-Bold.ttf"  # Linux
+# Для Windows можна так:
+# FONT_BOLD = "C:/Windows/Fonts/arialbd.ttf"
 
-
-def _load_font(size: int) -> ImageFont.ImageFont:
-    try:
-        import PIL
-        pil_fonts = Path(PIL.__file__).resolve().parent / "fonts"
-        return ImageFont.truetype(str(pil_fonts / "DejaVuSans.ttf"), size)
-    except Exception:
-        return ImageFont.load_default()
+# Центри (під твій template 1638x2048)
+NAME_CENTER_Y = 2000
+DATE_CENTER_Y = 2400
 
 
-def _safe_open_template(event: Event) -> Image.Image:
+def _fit_font(draw: ImageDraw.ImageDraw, text: str, font_path: str, target_width: int,
+              max_size: int = 240, min_size: int = 10) -> ImageFont.FreeTypeFont:
+    """Підбирає найбільший розмір шрифту, щоб текст вліз у target_width."""
+    lo, hi = min_size, max_size
+    best = min_size
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        font = ImageFont.truetype(font_path, mid)
+        x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
+        w = x1 - x0
+
+        if w <= target_width:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return ImageFont.truetype(font_path, best)
+
+
+def generate_ticket(full_name: str, date_text: str,
+                    template_path: Path = TEMPLATE_PATH):
     """
-    Priority:
-    1) event.ticket_template if реально існує
-    2) MEDIA_ROOT/templates/ex.png
-    3) fallback: пустий біленький
+    full_name: "Ніна Мацюк"
+    date_text: "21.03 / 9:30" (або будь-який формат, який хочеш показати)
     """
-    # 1) event template
-    try:
-        if event.ticket_template and getattr(event.ticket_template, "path", None):
-            p = Path(event.ticket_template.path)
-            if p.exists():
-                return Image.open(p).convert("RGBA")
-    except Exception:
-        pass
+    img = Image.open(template_path).convert("RGBA")
+    draw = ImageDraw.Draw(img)
 
-    # 2) default ex.png
-    try:
-        media_root = Path(getattr(settings, "MEDIA_ROOT", ""))  # може бути ''
-        default_path = media_root / DEFAULT_TEMPLATE_REL
-        if default_path.exists():
-            return Image.open(default_path).convert("RGBA")
-    except Exception:
-        pass
+    w, h = img.size
+    cx = w // 2
 
-    # 3) fallback
-    return Image.new("RGBA", (1600, 900), (20, 10, 40, 255))
+    # 1) Готуємо рядки імені (1-й рядок — ім’я, 2-й — решта)
+    parts = full_name.strip().split()
+    if len(parts) <= 1:
+        name_lines = [full_name.strip().upper()]
+    else:
+        name_lines = [parts[0].upper(), " ".join(parts[1:]).upper()]
 
+    # 2) Підбираємо шрифт під ширину (щоб довгі прізвища не вилазили)
+    max_name_width = int(w * 0.75)
+    name_fonts = [
+        _fit_font(draw, line, FONT_BOLD, max_name_width)
+        for line in name_lines
+    ]
 
-def generate_ticket(event: Event, user: TgUser, payment: Payment) -> Ticket:
-    base = _safe_open_template(event)
-    draw = ImageDraw.Draw(base)
-    W, H = base.size
+    # 3) Рахуємо висоту блоку і центруємо його по вертикалі
+    name_bboxes = [draw.textbbox((0, 0), line, font=f) for line, f in zip(name_lines, name_fonts)]
+    name_heights = [(b[3] - b[1]) for b in name_bboxes]
+    gap = int(0.15 * max(name_heights)) if name_heights else 0  # відступ між рядками
 
-    font_title = _load_font(max(34, int(H * 0.075)))
-    font_name = _load_font(max(26, int(H * 0.055)))
-    font_small = _load_font(max(20, int(H * 0.040)))
+    total_name_h = sum(name_heights) + gap * (len(name_lines) - 1)
+    y = NAME_CENTER_Y - total_name_h / 2
 
-    title = (event.title or "").strip()
-    name = (user.full_name or "").strip()
-    date_str = event.start_at.strftime("%d.%m.%Y %H:%M") if event.start_at else ""
-    code = f"ID: {payment.id}"
+    for line, font, line_h in zip(name_lines, name_fonts, name_heights):
+        # anchor="mm" = по центру (middle-middle)
+        draw.text((cx, y + line_h / 2), line, font=font, fill=(255, 255, 255, 255), anchor="mm")
+        y += line_h + gap
 
-    def xy(xp: float, yp: float) -> tuple[int, int]:
-        return int(W * xp), int(H * yp)
-
-    def text_shadow(pos, text, font, fill=(255, 255, 255, 255)):
-        if not text:
-            return
-        x, y = pos
-        draw.text((x + 3, y + 3), text, font=font, fill=(0, 0, 0, 160))
-        draw.text((x, y), text, font=font, fill=fill)
-
-    text_shadow(xy(0.08, 0.18), title, font_title)
-    text_shadow(xy(0.08, 0.30), name, font_name)
-    text_shadow(xy(0.08, 0.40), date_str, font_small)
-    text_shadow(xy(0.08, 0.50), code, font_small, fill=(230, 230, 230, 255))
-
-    token = uuid.uuid4().hex
-
-    buf = BytesIO()
-    base.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-
-    ticket = Ticket(user=user, event=event, payment=payment, token=token)
-    ticket.image.save(f"ticket_{token}.png", ContentFile(buf.read()), save=True)
-    return ticket
+    # 4) Дата
+    max_date_width = int(w * 0.60)
+    date_font = _fit_font(draw, date_text, FONT_BOLD, max_date_width, max_size=140)
+    draw.text((cx, DATE_CENTER_Y), date_text, font=date_font, fill=(255, 255, 255, 255), anchor="mm")
+    if not full_name:
+        raise ValueError("full_name is empty")
+    import re
+    safe_name = re.sub(r'[^a-zA-Z0-9_]+', '_', f"{full_name}_{date_text}".lower())
+    tickets_dir = Path("media/tickets")
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    out_path = f"ticket_{safe_name}.png"
+    img = img.convert("RGB")
+    img.save(tickets_dir / out_path.replace(".png", ".jpg"), format="JPEG", quality=82, optimize=True)
+    return out_path.replace(".png", ".jpg")

@@ -11,9 +11,6 @@ class TgUserSerializer(serializers.ModelSerializer):
 class TgUserCreateSerializer(serializers.Serializer):
     tg_id = serializers.IntegerField()
     username = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    first_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-
     full_name = serializers.CharField()
     age = serializers.IntegerField(required=False, allow_null=True)
     phone = serializers.CharField()
@@ -23,8 +20,7 @@ class TgUserCreateSerializer(serializers.Serializer):
 class TgUserCheckSerializer(serializers.Serializer):
     tg_id = serializers.IntegerField()
     username = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    first_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    full_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class EventForBotSerializer(serializers.ModelSerializer):
@@ -35,6 +31,9 @@ class EventForBotSerializer(serializers.ModelSerializer):
             "title",
             "welcome_text",
             "price",
+            "original_price_until",
+            "new_price_from",
+            "new_price_value",
             "required_group_id",
             "required_group_invite_link",
         )
@@ -43,6 +42,7 @@ class EventForBotSerializer(serializers.ModelSerializer):
 # serializers.py
 from rest_framework import serializers
 
+
 class PaymentCreateSerializer(serializers.Serializer):
     event_id = serializers.IntegerField()
 
@@ -50,8 +50,7 @@ class PaymentCreateSerializer(serializers.Serializer):
 
     tg_id = serializers.IntegerField(required=False)
     username = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    first_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    last_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    full_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     reg_data = serializers.DictField(required=False)
     promo_code = serializers.CharField(required=False, allow_blank=True)
@@ -63,39 +62,45 @@ class PaymentCreateSerializer(serializers.Serializer):
         return attrs
 
 
-
 class PaymentSerializer(serializers.ModelSerializer):
     provider_payment_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Payment
-        fields = ("id", "status", "amount", "provider", "provider_payment_url")
+        fields = ("id", "status", "amount", "provider", "provider_payment_url", 'extra')
 
     def get_provider_payment_url(self, obj):
         if obj.provider == "monobank":
             return None
 
         return (obj.extra or {}).get("provider_payment_url")
+
+
 class TicketSerializer(serializers.ModelSerializer):
-    image_url = serializers.SerializerMethodField()
     event_title = serializers.CharField(source="event.title")
     user_name = serializers.CharField(source="user.full_name")
+    date_text = serializers.SerializerMethodField()
+    image_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Ticket
-        fields = ("id", "image_url", "event_title", "user_name")
+        fields = ("id", "event_title", "user_name", "date_text", "image_url")
+
+    def get_date_text(self, obj):
+        return obj.event.start_at.strftime('%d.%m / %H:%M')
 
     def get_image_url(self, obj):
+        request = self.context.get("request")
         if not obj.image:
             return None
-        request = self.context.get("request")
-        url = obj.image.url
+        url = obj.image.url  # типу /media/tickets/xxx.png
         return request.build_absolute_uri(url) if request else url
 
 
 
 from rest_framework import serializers
 from core.models import TgUser, Event, Payment, Ticket
+
 
 class ConfirmMonobankSerializer(serializers.Serializer):
     payment_id = serializers.IntegerField()
@@ -104,6 +109,7 @@ class ConfirmMonobankSerializer(serializers.Serializer):
 
 from rest_framework import serializers
 from core.models import PromoCode
+
 
 class PromoValidateSerializer(serializers.Serializer):
     code = serializers.CharField()

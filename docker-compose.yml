@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    volumes:
+      - ./:/app
+      - media_volume:/app/media
+    ports:
+      - "8200:8200"
+    env_file: .env
+    command: python manage.py runserver 0.0.0.0:8200
+
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    container_name: prml_event_bot
+    env_file: .env
+    depends_on:
+      - backend
+    volumes:
+      - media_volume:/app/media
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      API_BASE_URL: http://backend:8200
+
+volumes:
+  media_volume:

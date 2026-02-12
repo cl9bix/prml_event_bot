@@ -1,11 +1,14 @@
+import datetime
 import logging
 import os
 import asyncio
 import time
+from bdb import effective
 from typing import Dict, Any, Optional
 from urllib.parse import quote
 
 import requests
+from kombu.serialization import raw_encode
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -21,15 +24,18 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ChatAction
-
+from dotenv import load_dotenv
+load_dotenv()
 
 # ================== НАЛАШТУВАННЯ ===================
 
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN",'8299398757:AAHvOZBKNbsVogB7X3jILQqXGUur89rT4rI')
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 DJANGO_BASE_URL = os.getenv("DJANGO_BASE_URL", "http://localhost:8000")
 
 API_CHECK_USER = f"{DJANGO_BASE_URL}/api/tg/check_user/"
+API_CREATE_USER = f"{DJANGO_BASE_URL}/api/user/create/"
 API_EVENTS_LIST = f"{DJANGO_BASE_URL}/api/events/"
+API_EVENT_DETAILS = f"{DJANGO_BASE_URL}/api/events/get/"
 API_CREATE_PAYMENT = f"{DJANGO_BASE_URL}/api/payments/create/"
 API_CREATE_PAYMENT_LINK = f"{DJANGO_BASE_URL}/api/payments/create/payment/link"
 API_CHECK_PAYMENT = f"{DJANGO_BASE_URL}/api/payments/check/"
@@ -49,13 +55,18 @@ MONO_STATEMENT_URL = "https://api.monobank.ua/personal/statement/{account}/{from
 MONO_DAYS_LOOKBACK = int(os.getenv("MONOBANK_DAYS_LOOKBACK", "3"))
 
 # Conversation states
-CHOOSING_EVENT, REG_NAME, REG_AGE, REG_PHONE, REG_EMAIL, ASK_PROMO, ENTER_PROMO, WAITING_PAYMENT, WAITING_GROUP = range(9)
+CHOOSING_EVENT, REG_NAME, REG_AGE, REG_PHONE, REG_EMAIL, ASK_PROMO, ENTER_PROMO, WAITING_PAYMENT, WAITING_GROUP,EVENTS = range(10)
+
 
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,14 +98,18 @@ def check_user(tg_user) -> Dict[str, Any]:
     payload = {
         "tg_id": tg_user.id,
         "username": tg_user.username,
-        "first_name": tg_user.first_name,
-        "last_name": tg_user.last_name,
+
     }
     return api_get_json("POST", API_CHECK_USER, json=payload)
 
+def create_user(payload:dict)-> Dict[str,Any]:
+    return api_get_json("POST",API_CREATE_USER,json=payload)
 
 def get_events() -> Dict[str, Any]:
     return api_get_json("GET", API_EVENTS_LIST)
+
+def get_event_details(event_id: int) -> Dict[str, Any]:
+    return api_get_json("GET", API_EVENT_DETAILS,params = {'event_id': event_id})
 
 
 def create_payment(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -220,12 +235,26 @@ def nice_event_card(event: dict) -> str:
     ).strip()
 
 
-async def is_user_in_required_group(context: ContextTypes.DEFAULT_TYPE, group_id: int, user_id: int) -> bool:
+async def is_user_in_required_group(
+    context: ContextTypes.DEFAULT_TYPE,
+    group_id: int,
+    user_id: int,
+) -> bool:
     try:
         member = await context.bot.get_chat_member(group_id, user_id)
         return member.status in ("member", "administrator", "creator")
-    except Exception:
+    except Exception as e:
+        logger.warning("get_chat_member failed: group_id=%s user_id=%s err=%s", group_id, user_id, e)
         return False
+
+def _extract_user_id(message_or_query, fallback_update: Update | None = None) -> int | None:
+    if hasattr(message_or_query, "from_user") and message_or_query.from_user:
+        return message_or_query.from_user.id
+    if hasattr(message_or_query, "message") and message_or_query.message and message_or_query.message.from_user:
+        return message_or_query.message.from_user.id
+    if fallback_update and fallback_update.effective_user:
+        return fallback_update.effective_user.id
+    return None
 
 
 # ================== BOT FLOW ===================
@@ -253,29 +282,107 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     else:
         await update.message.reply_text(
             "Схоже, ти вперше тут 🙂\n"
-            "Зробимо все за 60 секунд: 1) обираєш івент 2) оплата 3) квиток 🎫"
+            "Зробимо все за 60 секунд: 1) обираєш подію 2) оплата 3) квиток 🎫"
         )
 
     return await show_events(update, context)
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎉 Івенти", callback_data="menu_events")],
+        [
+            InlineKeyboardButton("👤 Мій профіль", callback_data="menu_profile"),
+        ],
+        [
+            InlineKeyboardButton("ℹ️ Про нас", callback_data="menu_about"),
+            InlineKeyboardButton("💎 Наші цінності", callback_data="menu_values"),
+        ],
+    ])
+
+    text = "<b>Головне меню 👇</b>"
+
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    tg_id = query.from_user.id
+    user={'tg_id':tg_id,'username':update.effective_user.username}
+    user_q = check_user(user)
+    if user_q['exists'] is not True:
+        return await query.message.reply_text(
+            "Ви не зареєструвались!"
+    )
+    kb =[
+        [InlineKeyboardButton('Назад',callback_data='menu')]
+    ]
+    userName = user_q['user']['full_name']
+    userAge = user_q['user']['age']
+    userPhone = user_q['user']['phone']
+    userEmail = user_q['user']['full_name']
+    userUsername = user_q['user']['username']
+    userTgId = user_q['user']['tg_id']
+    return await query.message.reply_text(
+        f"Ім`я: <b>{userName}</b>"
+        f"Вік: <b>{userAge}</b>"
+        f"Номер телефону: <b>{userPhone}</b>"
+        f"Email: <b>{userEmail}</b>"
+        f"username: <b>{userUsername}</b>"
+        
+        f"telegram id: </b>{userTgId}</b>",parse_mode="HTML"
+    )
+
+
+async def menu_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.edit_text(
+        "ℹ️ Ми організовуємо круті подіїи.\n\n"
+        "Мета — якісне комʼюніті та атмосфера."
+    )
+
+async def menu_values(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.message.edit_text(
+        "💎 Наші цінності:\n\n"
+        "• Якість\n"
+        "• Комʼюніті\n"
+        "• Атмосфера\n"
+        "• Відповідальність"
+    )
+
+
 
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await typing(update, 0.4)
     resp = get_events()
     if not resp.get("ok"):
-        await update.effective_message.reply_text("Не можу отримати список івентів 😢")
+        await update.effective_message.reply_text("Не можу отримати список подій 😢")
         return ConversationHandler.END
 
     events = resp.get("events", [])
     if not events:
-        await update.effective_message.reply_text("Зараз немає активних івентів.")
+        await update.effective_message.reply_text("Зараз немає активних подій.")
         return ConversationHandler.END
 
     context.user_data["events"] = {e["id"]: e for e in events}
 
     keyboard = [[InlineKeyboardButton(f"🎉 {e['title']}", callback_data=f"event_{e['id']}")] for e in events]
     await update.effective_message.reply_text(
-        "Обери івент 👇",
+        "Обери подію 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return CHOOSING_EVENT
@@ -290,28 +397,41 @@ async def event_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     event = context.user_data.get("events", {}).get(event_id)
     if not event:
-        await query.edit_message_text("Не знайшов такий івент 😕")
+        await query.edit_message_text("Не знайшов таку подію 😕")
         return ConversationHandler.END
 
     context.user_data["chosen_event"] = event
 
     await query.edit_message_text(nice_event_card(event), parse_mode="HTML")
 
-    # WAU: маленький “progress”
-    await query.message.reply_text("✅ Крок 1/3: Івент обрано.\nТепер — міні-реєстрація або одразу оплата 🚀")
-
-    if not context.user_data.get("is_registered", False):
+    await typing(update,0.4)
+    await query.message.reply_text("✅ Крок 1/3: Івент обрано.\n")
+    await typing(update,0.4)
+    user = update.effective_user
+    is_exsists = check_user(user)
+    if is_exsists['exists'] is not True:
+    # if not context.user_data.get("is_registered", False):
         context.user_data["reg_data"] = {}
+        context.user_data['reg_data']['username'] = user.username
+        context.user_data['reg_data']['tg_id'] = user.id
+        await query.message.reply_text("Тепер — міні-реєстрація ")
+        await typing(update,0.5)
         await query.message.reply_text("Як тебе звати? 🙂")
-        return REG_NAME
 
+        return REG_NAME
+    await query.message.reply_text("Перейдемо одразу до оплати!")
     return await start_payment_flow(update, context)
 
 
 # ===== Registration (in memory only) =====
 
 async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["reg_data"]["name"] = update.message.text.strip()
+    get_user_full_name:str = update.message.text.strip()
+    if len(get_user_full_name.split(' ')) <2:
+        await update.message.reply_text("Введи будь-ласка своє повне ім'я! (приклад: Тарас Шевченко)")
+        return REG_NAME
+
+    context.user_data["reg_data"]["full_name"] = get_user_full_name
     await update.message.reply_text("Твій вік? (числом)")
     return REG_AGE
 
@@ -327,15 +447,41 @@ async def reg_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def reg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["reg_data"]["phone"] = update.message.text.strip()
+    get_phone = update.message.text.strip()
+    import re
+    is_valid = lambda s: bool(re.fullmatch(r'(?:\+?38)?0\d{9}', re.sub(r'\D', '', s)))
+    if not is_valid(get_phone):
+        await update.message.reply_text("Введи будь ласка коректний номер телефону: (+380501234567)")
+        return REG_PHONE
+
+    context.user_data["reg_data"]["phone"] = get_phone
     await update.message.reply_text("Email?")
     return REG_EMAIL
 
 
 async def reg_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["reg_data"]["email"] = update.message.text.strip()
-    await update.message.reply_text("✅ Крок 1/3 готово. Далі — оплата 💳")
-    return await start_payment_flow(update, context)
+    get_email = update.message.text.strip()
+    import re
+    is_email = lambda s: bool(re.fullmatch(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', s))
+
+    if not is_email(get_email):
+        await update.message.reply_text("Введи будь ласка коректний email: (test@test.com)")
+        return REG_EMAIL
+
+    context.user_data["reg_data"]["email"] = get_email
+    logger.info('Creating user [%s]. with tg_id=%s', context.user_data["reg_data"]["full_name"],update.effective_user.id
+
+    )
+    try:
+        payload = context.user_data["reg_data"]
+        logger.info("Payload data for user==%s",payload)
+        is_created = create_user(payload)
+        await update.message.reply_text("✅ Крок 1/3 готово. Далі — оплата 💳")
+        return await start_payment_flow(update, context)
+    except Exception as e:
+        logger.exception('Error by creating user: %s',e)
+        await update.message.reply_text("Помилка на сервері,натисніть /start")
+
 
 
 # ===== Payment =====
@@ -344,7 +490,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     backend_user = context.user_data.get("backend_user")
     event = context.user_data.get("chosen_event")
     tg_user = update.effective_user
-    reg_data = context.user_data.get("reg_data")
+    reg_data = context.user_data.get("reg_data") or check_user(update.effective_user) or None
 
     if not event:
         await update.effective_message.reply_text("Івент загубився 😅 Почни /start")
@@ -364,16 +510,18 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return ASK_PROMO
         final_amount = promo_check['final_amount']
         payload['final_amount'] = final_amount
-    if backend_user:
-        payload["user_id"] = backend_user["id"]
-    else:
+    try:
+        backend_user = check_user(update.effective_user)
+        user_id = backend_user['user']['id']
         payload.update({
+            "user_id": user_id,
             "tg_id": tg_user.id,
             "username": tg_user.username,
-            "first_name": tg_user.first_name,
-            "last_name": tg_user.last_name,
+            "full_name": tg_user.full_name,
             "reg_data": reg_data,
         })
+    except Exception as e:
+        logger.warning("ERROR by start_payment_flow=%s",e)
 
 
 
@@ -383,41 +531,47 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Не вдалось створити платіж 😢 Спробуй пізніше.")
         context.user_data.pop("promo_code", None)
         return ConversationHandler.END
-    print("RESP:",resp)
 
     payment = resp.get("payment", {})
     context.user_data["payment"] = payment
-
     provider = payment.get("provider", "unknown")
 
     invoice = resp.get("invoice") or {}
     invoice_data = invoice.get("invoiceData") or {}
     payment_link = invoice_data.get("pageUrl")
+    logger.info("[EVENT_data]==%s",event)
+
 
     if provider == "monobank":
         text = (
-            "🔥 <b>Крок 2/3: Оплата</b>\n\n"
+            "<b>Крок 2 з 3: оплата.</b>\n\n"
         )
 
     if promo_code:
         text += (
             f"Промокод: <code>{promo_code}</code> 🎁\n"
-            f"Вартість івенту: <s>{price} грн</s>  <b>{final_amount} грн</b>\n"
+            f"Вартість конференції: <s>{price} грн</s>  <b>{final_amount} гривень</b>\n"
         )
     else:
-        text += f"Вартість івенту: <b>{price} грн</b>\n"
+        new_price_value:str = event['new_price_value']
+        text += f"Вартість конференції:\n<b>{price} гривень - {event['original_price_until']}</b>\n<b>{new_price_value.removesuffix('.00')} гривень - {event['new_price_from']}</b>"
 
     text += (
-        "\nНатискай кнопку нижче — оплата швидко та безпечно через Monobank 🐈‍⬛\n"
-        "Після оплати натисни «✅ Я оплатив(ла)» — і квиток одразу прилетить сюди 🎟"
+        "\n\n"
+        "Оплату можна здійснити комфортним способом онлайн, натиснувши кнопку нижче\n"
+        "Після оплати натисни «✅ Я оплатив(ла)» і твій індивідуальний квиток з’явиться нижче."
+        "\n\n"
+        "\n\n"
+        "<b>З важливого:</b>\n"
+        "згідно з нашою політикою щодо повернення коштів поділимося з тобою декількома правилами:\n\n"
+        "  -  Повернення <b>100%</b> вартості квитка можливе лише за умови звернення не пізніше ніж за <b>10</b> днів до початку події.\n\n"
+        "  -  Менш ніж за <b>14</b> днів до початку події повернення коштів не здійснюється, проте ви можете передати свій квиток іншій особі, повідомивши про це організаторів."
     )
-
 
     kb_rows = []
     if payment_link:
         kb_rows.append([InlineKeyboardButton("Посилання на оплату 🔗", url=payment_link)])
     kb_rows.append([InlineKeyboardButton("✅ Я оплатив(ла)", callback_data="check_payment")])
-    kb_rows.append([InlineKeyboardButton("🔁 Обрати інший івент", callback_data="back_to_events")])
 
     msg = update.callback_query.message if update.callback_query else update.message
     await msg.reply_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode="HTML")
@@ -431,10 +585,10 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     payment = context.user_data.get("payment")
     if not payment:
-        await query.edit_message_text("Платіж не знайдено 😕 Почни /start")
+        await query.message.reply_text("Платіж не знайдено 😕 Почни /start")
         return ConversationHandler.END
 
-    await query.edit_message_text("Перевіряю оплату… ⏳")
+    await query.answer("Перевіряю оплату… ⏳")
     await asyncio.sleep(1)
 
     provider = payment.get("provider", "unknown")
@@ -442,11 +596,11 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     # ================= MONOBANK =================
     if provider == "monobank":
-        resp = check_payment_monobank(payment_id=payment_id)  # sync
+        resp = check_payment_monobank(payment_id=payment_id)
 
         if not resp.get("ok"):
-            await query.edit_message_text(
-                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше."
+            await query.answer(
+                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.",show_alert=True
             )
             return WAITING_PAYMENT
 
@@ -464,20 +618,20 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             return await gate_group_then_ticket(query, context)
 
         if status == "pending":
-            await query.edit_message_text(
-                "Поки не бачу підтвердження 🙏 Спробуй ще раз через хвильку."
+            await query.message.reply_text(
+                "Поки не бачу підтвердження 🙏 Спробуй ще раз через хвильку.",
             )
             return WAITING_PAYMENT
 
         # failed / canceled
-        await query.edit_message_text("Схоже, оплата не пройшла 😕")
+        await query.message.reply_text("Схоже, оплата не пройшла 😕")
         return ConversationHandler.END
 
     # ================= ІНШІ ПЛАТІЖКИ =================
     resp = check_payment_status(payment_id)
 
     if not resp.get("ok"):
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше."
         )
         return WAITING_PAYMENT
@@ -496,12 +650,12 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return await gate_group_then_ticket(query, context)
 
     if status == "pending":
-        await query.edit_message_text(
-            "Поки що не бачу підтвердження 🙏 Спробуй ще раз через хвильку."
+        await query.message.reply_text(
+            "Поки що не бачу підтвердження 🙏 Спробуй ще раз через хвильку.",
         )
         return WAITING_PAYMENT
 
-    await query.edit_message_text("Схоже, оплата не пройшла 😕")
+    await query.message.reply_text("Схоже, оплата не пройшла 😕",)
     context.user_data.pop("promo_code", None)
 
     return ConversationHandler.END
@@ -524,7 +678,7 @@ async def check_payment_backend(query, context: ContextTypes.DEFAULT_TYPE) -> Op
     amount_uah = event_price_uah(event)
 
     try:
-        acc = get_payment_config()        # рахунок mono
+        acc = get_payment_config()
         tx = get(
             acc,
             user_id=user.id,
@@ -567,40 +721,72 @@ async def check_payment_backend(query, context: ContextTypes.DEFAULT_TYPE) -> Op
 # ===== Group gate -> Ticket =====
 
 async def gate_group_then_ticket(message_or_query, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    3/3: перевірка групи — якщо ок, одразу квиток.
-    """
     event = context.user_data.get("chosen_event")
-    user_id = message_or_query.from_user.id if hasattr(message_or_query, "from_user") else context._user_id_and_data[0]
+    if not event:
+        if hasattr(message_or_query, "edit_message_text"):
+            await message_or_query.edit_message_text("Івент загубився 😕 Почни з /start")
+        else:
+            await message_or_query.reply_text("Івент загубився 😕 Почни з /start")
+        return ConversationHandler.END
 
     required_group_id = event.get("required_group_id")
     invite_link = event.get("required_group_invite_link")
 
+    logger.info(
+        "[gate_group_then_ticket] required_group_id=%s invite_link=%s",
+        required_group_id,
+        invite_link,
+    )
+
     if not required_group_id:
-        # якщо раптом у евента не налаштована група — видаємо квиток
         return await send_ticket(message_or_query, context)
+
+    user_id = _extract_user_id(message_or_query)
+    if not user_id:
+        if hasattr(message_or_query, "edit_message_text"):
+            await message_or_query.edit_message_text("Не зміг визначити твій user_id 😕 Спробуй /start")
+        else:
+            await message_or_query.reply_text("Не зміг визначити твій user_id 😕 Спробуй /start")
+        return ConversationHandler.END
 
     in_group = await is_user_in_required_group(context, int(required_group_id), int(user_id))
     if in_group:
+        msg = "✅ Крок 3/3: Доступ підтверджено. Видаю квиток… 🎫"
         if hasattr(message_or_query, "edit_message_text"):
-            await message_or_query.edit_message_text("✅ Крок 3/3: Доступ підтверджено. Видаю квиток… 🎫")
+            await message_or_query.edit_message_text(msg)
         else:
-            await message_or_query.reply_text("✅ Крок 3/3: Доступ підтверджено. Видаю квиток… 🎫")
+            await message_or_query.reply_text(msg)
+
         await asyncio.sleep(0.4)
         return await send_ticket(message_or_query, context)
 
-    # не в групі — просимо вступити
+    if not invite_link:
+        text = (
+            "✅ Оплата є!\n\n"
+            "🔒 Для видачі квитка треба бути в групі події, але лінк зараз не налаштований.\n"
+            "Напиши адміну 🙏"
+        )
+        if hasattr(message_or_query, "edit_message_text"):
+            await message_or_query.edit_message_text(text)
+        else:
+            await message_or_query.reply_text(text)
+        return WAITING_GROUP
+
     text = (
         "✅ Оплата є!\n\n"
-        "🔒 Щоб отримати квиток, потрібно бути в групі івенту.\n"
+        "🔒 Щоб отримати квиток, потрібно бути в групі події.\n"
         f"Ось лінк: {invite_link}\n\n"
         "Після вступу натисни кнопку 👇"
     )
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Я вже в групі", callback_data="check_group")]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Я вже в групі", callback_data="check_group")]
+    ])
+
     if hasattr(message_or_query, "edit_message_text"):
         await message_or_query.edit_message_text(text, reply_markup=kb)
     else:
         await message_or_query.reply_text(text, reply_markup=kb)
+
     return WAITING_GROUP
 
 
@@ -652,7 +838,7 @@ async def send_ticket(message_or_query, context: ContextTypes.DEFAULT_TYPE) -> i
 
     caption = (
         "🎫 Ось твій квиток!\n"
-        "Збережи його — і побачимось на івенті 🔥"
+        "Збережи його — і побачимось на подіїі 🔥"
     )
 
     try:
@@ -706,13 +892,17 @@ async def my_tickets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def back_to_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Окей, повертаю список івентів 👇")
+    await query.edit_message_text("Окей, повертаю список подій 👇")
     return await show_events(update, context)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Окей 🙂 Якщо що — пиши /start")
     return ConversationHandler.END
+
+
+async def debug_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("CHAT ID:", update.effective_chat.id)
 
 
 # ================== MAIN ===================
@@ -742,8 +932,13 @@ def main() -> None:
             ],
             WAITING_PAYMENT: [
                 CallbackQueryHandler(check_payment, pattern=r"^check_payment$"),
-                CallbackQueryHandler(back_to_events, pattern=r"^back_to_events$"),
+                # CallbackQueryHandler(back_to_events, pattern=r"^back_to_events$"),
             ],
+
+            EVENTS: [
+                CallbackQueryHandler(show_events,pattern=r"^show_events$")
+            ],
+
             WAITING_GROUP: [
                 CallbackQueryHandler(check_group, pattern=r"^check_group$"),
             ],
@@ -753,8 +948,24 @@ def main() -> None:
 
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("mytickets", my_tickets))
+    # application.add_handler(MessageHandler(filters.ALL, debug_group))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler("menu", pattern="^menu$"))
+    application.add_handler(CallbackQueryHandler(menu_profile, pattern="^menu_profile$"))
+    application.add_handler(CallbackQueryHandler(menu_about, pattern="^menu_about$"))
+    application.add_handler(CallbackQueryHandler(menu_values, pattern="^menu_values$"))
+    application.add_handler(CallbackQueryHandler(show_events, pattern="^menu_events$"))
+    application.add_handler(CallbackQueryHandler(event_chosen,  pattern = r"^event_\d+$"))
+    application.add_handler(CallbackQueryHandler(promo_yes, pattern=r"^promo_yes$"))
+    application.add_handler(CallbackQueryHandler(promo_no,pattern=r"^promo_no$"))
+    application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_payment$"))
+    application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^show_events$"))
+    application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_group$"))
 
-    logger.info("Bot starting...")
+
+
+    logger.info("BOT SUCCESSFULLY STARTED - %s",time.strftime("%y/%m/%d (%H:%M:%S)"))
     application.run_polling()
 
 

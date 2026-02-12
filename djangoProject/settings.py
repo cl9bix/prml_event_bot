@@ -9,7 +9,7 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
-
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -23,16 +23,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
+DEBUG = True
+CSRF_TRUSTED_ORIGINS = ['https://unsyncopated-shufflingly-gerald.ngrok-free.dev'
+]
+ALLOWED_HOSTS = ['*','https://*.ngrok-free.dev',BASE_BACKEND_URL]
 MEDIA_URL = '/media/'
 MEDIA_ROOT= BASE_DIR / "media"
 SWAGGER_YAML_FILE=''
-QR_BASE_URL='http://localhost:8000'
-SEERVER_BASE_URL='http://localhost:8000'
+QR_BASE_URL=BASE_BACKEND_URL
 BOT_USERNAME = 'feri_event_test_bot'
-# Application definition
+
+
 
 REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
