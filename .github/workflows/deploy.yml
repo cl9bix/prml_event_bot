@@ -1,4 +1,4 @@
-name: Build & Push (production → Docker Hub)
+name: Build & Push + Deploy (prod)
 
 on:
   push:
@@ -6,21 +6,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: prml_event_bot-production
+  group: prml_event-production
   cancel-in-progress: true
 
 env:
-  REGISTRY: docker.io
-  IMAGE_NAME: prml_event_bot
-  IMAGE: docker.io/${{ secrets.DOCKERHUB_USER }}/prml_event_bot-web
-  IMAGE_NGINX: docker.io/${{ secrets.DOCKERHUB_USER }}/primadent-nginx
+  DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+  BACKEND_IMAGE: docker.io/${{ secrets.DOCKERHUB_USER }}/prml_event-backend
+  BOT_IMAGE: docker.io/${{ secrets.DOCKERHUB_USER }}/prml_event_bot
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
 
     steps:
       - name: Checkout repository
@@ -35,54 +33,51 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ───── web (build & push) ─────
-      - name: Build & push web image
+      # ---------- BACKEND ----------
+      - name: Build & push backend image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: true
           tags: |
-            ${{ env.IMAGE }}:prod-${{ github.sha }}
-            ${{ env.IMAGE }}:prod-latest
-          cache-from: type=registry,ref=${{ env.IMAGE }}:prod-latest
+            ${{ env.BACKEND_IMAGE }}:prod-${{ github.sha }}
+            ${{ env.BACKEND_IMAGE }}:prod-latest
+          cache-from: type=registry,ref=${{ env.BACKEND_IMAGE }}:prod-latest
           cache-to: type=inline
-        env:
-          BUILDKIT_PROGRESS: plain
 
-      # ───── nginx (build & push) ─────
-      # Якщо nginx реально збирається з репозиторію — лишай увімкненим
-#      - name: Build & push nginx image
-#        uses: docker/build-push-action@v5
-#        with:
-#          context: .
-#          file: ./nginx/Dockerfile
-#          push: true
-#          tags: |
-#            ${{ env.IMAGE_NGINX }}:prod-${{ github.sha }}
-#            ${{ env.IMAGE_NGINX }}:prod-latest
-#          cache-from: type=registry,ref=${{ env.IMAGE_NGINX }}:prod-latest
-#          cache-to: type=inline
-#        env:
-#          BUILDKIT_PROGRESS: plain
+      # ---------- BOT ----------
+      - name: Build & push bot image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./bot
+          file: ./bot/Dockerfile
+          push: true
+          tags: |
+            ${{ env.BOT_IMAGE }}:prod-${{ github.sha }}
+            ${{ env.BOT_IMAGE }}:prod-latest
+          cache-from: type=registry,ref=${{ env.BOT_IMAGE }}:prod-latest
+          cache-to: type=inline
 
-      # ───── deploy ─────
+      # ---------- DEPLOY ----------
       - name: Deploy on server (docker compose pull + up)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
           script: |
-            set -euo pipefail
-            cd "${{ secrets.PROJECT_PATH }}"
+            set -e
+
+            echo "===> cd to project"
+            cd /root/prml_event_bot
 
             echo "===> Docker login"
             docker login -u "${{ secrets.DOCKERHUB_USER }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
             echo "===> Pull newest images"
-            docker compose pull web nginx
+            docker compose pull
 
             echo "===> Up containers"
             docker compose up -d --remove-orphans
