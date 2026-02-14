@@ -30,13 +30,15 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = True
-CSRF_TRUSTED_ORIGINS = ['https://unsyncopated-shufflingly-gerald.ngrok-free.dev']
-ALLOWED_HOSTS = ['*','https://*.ngrok-free.dev',BASE_BACKEND_URL]
+CSRF_TRUSTED_ORIGINS = ['admin_event.prml.in.ua']
+ALLOWED_HOSTS = ['*','admin_event.prml.in.ua',BASE_BACKEND_URL]
+STATIC_URL = "/static/"
+STATIC_ROOT = "/app/staticfiles"
 MEDIA_URL = '/media/'
-MEDIA_ROOT= BASE_DIR / "media"
+MEDIA_ROOT = "/app/media"
 SWAGGER_YAML_FILE=''
 QR_BASE_URL=BASE_BACKEND_URL
-BOT_USERNAME = 'feri_event_test_bot'
+BOT_USERNAME = 'prml_event_bot'
 
 CELERY_BROKER_URL = os.getenv("REDIS_URL")
 CELERY_RESULT_BACKEND = os.getenv("REDIS_URL")
@@ -161,7 +163,6 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
