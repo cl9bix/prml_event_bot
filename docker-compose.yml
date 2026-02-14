@@ -23,7 +23,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      - "82:82"
       # якщо SSL буде в nginx контейнері:
       # - "443:443"
     volumes:

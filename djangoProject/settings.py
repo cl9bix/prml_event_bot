@@ -30,8 +30,8 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = True
-CSRF_TRUSTED_ORIGINS = ['admin_event.prml.in.ua']
-ALLOWED_HOSTS = ['*','admin_event.prml.in.ua',BASE_BACKEND_URL]
+CSRF_TRUSTED_ORIGINS = ['https://admin_event.prml.in.ua']
+ALLOWED_HOSTS = ['*','https://admin_event.prml.in.ua',BASE_BACKEND_URL]
 STATIC_URL = "/static/"
 STATIC_ROOT = "/app/staticfiles"
 MEDIA_URL = '/media/'
@@ -43,8 +43,7 @@ BOT_USERNAME = 'prml_event_bot'
 CELERY_BROKER_URL = os.getenv("REDIS_URL")
 CELERY_RESULT_BACKEND = os.getenv("REDIS_URL")
 CELERY_TIMEZONE = "Europe/Vienna"
-CELERY_TASK_ALWAYS_EAGER = False  # в проді False
-
+CELERY_TASK_ALWAYS_EAGER = False
 from celery.schedules import crontab
 
 CELERY_BEAT_SCHEDULE = {
