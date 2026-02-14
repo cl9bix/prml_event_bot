@@ -11,9 +11,7 @@ def enqueue_broadcast(broadcast: TgBroadcast, *, trigger: str = "admin_broadcast
     qs = TgUser.objects.all()
     if broadcast.segment == TgBroadcast.Segment.PAID:
         qs = qs.filter(has_paid_once=True)
-
     tg_ids = list(qs.values_list("tg_id", flat=True))
-
     if not tg_ids:
         logger.info("enqueue_broadcast: no recipients | broadcast_id=%s", broadcast.id)
         broadcast.enqueued_count = 0
@@ -26,7 +24,7 @@ def enqueue_broadcast(broadcast: TgBroadcast, *, trigger: str = "admin_broadcast
     messages = [
         TgOutboxMessage(
             tg_id=tg_id,
-            event=broadcast.event,  # може бути None (якщо в моделі event null=True)
+            event=broadcast.event,
             trigger=trigger,
             status=TgOutboxMessage.Status.PENDING,
             run_at=now,
