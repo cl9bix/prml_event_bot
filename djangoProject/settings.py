@@ -29,9 +29,9 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 # SECURITY WARNING: don't run with debug turned on in production!
 
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
-DEBUG = True
+DEBUG = False
 CSRF_TRUSTED_ORIGINS = ['https://admin_event.prml.in.ua']
-ALLOWED_HOSTS = ['*','admin_event.prml.in.ua']
+ALLOWED_HOSTS = [".prml.in.ua"]
 STATIC_URL = "/static/"
 STATIC_ROOT = "/app/staticfiles"
 MEDIA_URL = '/media/'
@@ -39,6 +39,7 @@ MEDIA_ROOT = "/app/media"
 SWAGGER_YAML_FILE=''
 QR_BASE_URL=BASE_BACKEND_URL
 BOT_USERNAME = 'prml_event_bot'
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 CELERY_BROKER_URL = os.getenv("REDIS_URL")
 CELERY_RESULT_BACKEND = os.getenv("REDIS_URL")
