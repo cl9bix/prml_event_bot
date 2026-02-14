@@ -7,14 +7,12 @@ from django.utils import timezone
 class TgUser(models.Model):
     tg_id = models.BigIntegerField(unique=True)
     username = models.CharField(max_length=255, blank=True, null=True)
-    # first_name = models.CharField(max_length=255, blank=True, null=True)
-    # last_name = models.CharField(max_length=255, blank=True, null=True)
     full_name = models.CharField(max_length=255)
     age = models.PositiveIntegerField(null=True, blank=True)
     phone = models.CharField(max_length=50)
     email = models.EmailField()
 
-    has_paid_once = models.BooleanField(default=False)
+    has_paid_once = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -27,12 +25,19 @@ class Event(models.Model):
     title = models.CharField(max_length=255)
     welcome_text = models.TextField()
     description = models.TextField(blank=True)
-    banner_image = models.ImageField(upload_to="event_banners/")
+
+    # banner_image = models.ImageField(upload_to="event_banners/")
     ticket_template = models.ImageField(upload_to="ticket_templates/")
+
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    original_price_until = models.CharField(help_text='до 28 лютого')
-    new_price_from = models.CharField(help_text='з 1 березня',default=' ')
-    new_price_value = models.DecimalField(max_digits=10,decimal_places=2,help_text='нова ціна,її треба вручну поставити в "price"')
+
+    original_price_until = models.CharField(max_length=64, help_text="до 28 лютого")
+    new_price_from = models.CharField(max_length=64, help_text="з 1 березня", default=" ")
+    new_price_value = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        help_text='нова ціна, її треба вручну поставити в "price"'
+    )
+
     is_active = models.BooleanField(default=True)
     start_at = models.DateTimeField()
     end_at = models.DateTimeField()
@@ -47,7 +52,6 @@ class Event(models.Model):
 
 
 # ================= EVENT MESSAGE TEMPLATES =================
-# ⬅️ ОЦЕ і є "1.1 EventMessageTemplate — те, що адмін редагує"
 
 class EventMessageTemplate(models.Model):
     class Trigger(models.TextChoices):
@@ -57,7 +61,6 @@ class EventMessageTemplate(models.Model):
         AFTER_TICKET_SENT = "after_ticket_sent", "Після видачі квитка"
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="message_templates")
-
     trigger = models.CharField(max_length=64, choices=Trigger.choices)
     title = models.CharField(max_length=200, default="Message")
     text = models.TextField()
@@ -78,9 +81,11 @@ class TgOutboxMessage(models.Model):
         FAILED = "failed", "Failed"
 
     tg_id = models.BigIntegerField(db_index=True)
-    event = models.ForeignKey(Event, on_delete=models.CASCADE)
 
-    trigger = models.CharField(max_length=64)
+    # ✅ ВАЖЛИВО: робимо event необовʼязковим для broadcast-розсилок
+    event = models.ForeignKey(Event, on_delete=models.SET_NULL, null=True, blank=True)
+
+    trigger = models.CharField(max_length=64, db_index=True)
     text = models.TextField()
 
     run_at = models.DateTimeField(db_index=True)
@@ -94,52 +99,7 @@ class TgOutboxMessage(models.Model):
         return f"{self.tg_id} | {self.trigger} | {self.status}"
 
 
-# ================= PAYMENTS =================
-
-class Payment(models.Model):
-    STATUS_CHOICES = [
-        ("pending", "Pending"),
-        ("success", "Success"),
-        ("failed", "Failed"),
-    ]
-
-    user = models.ForeignKey(
-        TgUser, on_delete=models.CASCADE,
-        null=True, blank=True, related_name="payments"
-    )
-    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="payments")
-
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
-    provider = models.CharField(max_length=50, default="monobank")
-    provider_payment_id = models.CharField(max_length=255, blank=True, null=True)
-    extra = models.JSONField(default=dict, blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    promo_code = models.ForeignKey("PromoCode", null=True, blank=True, on_delete=models.SET_NULL)
-    discount_percent = models.PositiveIntegerField(default=0)
-    original_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    last_provider_sync_at = models.DateTimeField(null=True, blank=True)
-    def __str__(self):
-        return f"Payment #{self.id} ({self.status})"
-
-
-# ================= TICKETS =================
-
-class Ticket(models.Model):
-    user = models.ForeignKey(TgUser, on_delete=models.CASCADE)
-    event = models.ForeignKey(Event, on_delete=models.CASCADE)
-    payment = models.OneToOneField(Payment, on_delete=models.CASCADE)
-
-    token = models.CharField(max_length=64, unique=True)
-    image = models.ImageField(upload_to="tickets/")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-from django.db import models
-from django.utils import timezone
-
-
+# ================= PROMOCODES =================
 
 class PromoCode(models.Model):
     code = models.CharField(max_length=16, unique=True)
@@ -161,3 +121,70 @@ class PromoCode(models.Model):
 
     def __str__(self):
         return f"{self.code} (-{self.percentage}%)"
+
+
+# ================= PAYMENTS =================
+
+class Payment(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("success", "Success"),
+        ("failed", "Failed"),
+    ]
+
+    user = models.ForeignKey(TgUser, on_delete=models.CASCADE, null=True, blank=True, related_name="payments")
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="payments")
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    provider = models.CharField(max_length=50, default="monobank")
+    provider_payment_id = models.CharField(max_length=255, blank=True, null=True)
+    extra = models.JSONField(default=dict, blank=True)
+
+    promo_code = models.ForeignKey(PromoCode, null=True, blank=True, on_delete=models.SET_NULL)
+    discount_percent = models.PositiveIntegerField(default=0)
+    original_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    last_provider_sync_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Payment #{self.id} ({self.status})"
+
+
+# ================= TICKETS =================
+
+class Ticket(models.Model):
+    user = models.ForeignKey(TgUser, on_delete=models.CASCADE)
+    event = models.ForeignKey(Event, on_delete=models.CASCADE)
+    payment = models.OneToOneField(Payment, on_delete=models.CASCADE)
+
+    token = models.CharField(max_length=64, unique=True)
+    image = models.ImageField(upload_to="tickets/")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Ticket #{self.id} for {self.user_id}"
+
+
+# ================= BROADCAST =================
+
+class TgBroadcast(models.Model):
+    class Segment(models.TextChoices):
+        ALL = "all", "All users"
+        PAID = "paid", "Paid users"
+
+    title = models.CharField(max_length=120, blank=True, default="")
+    segment = models.CharField(max_length=10, choices=Segment.choices, default=Segment.ALL)
+    text = models.TextField()
+
+    event = models.ForeignKey(Event, on_delete=models.SET_NULL, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    enqueued_count = models.PositiveIntegerField(default=0)
+    enqueued_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return self.title or f"Broadcast #{self.pk}"

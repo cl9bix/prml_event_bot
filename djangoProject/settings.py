@@ -15,7 +15,11 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+from dotenv import load_dotenv
+load_dotenv()
 
+
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN")
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
@@ -26,8 +30,7 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = True
-CSRF_TRUSTED_ORIGINS = ['https://unsyncopated-shufflingly-gerald.ngrok-free.dev'
-]
+CSRF_TRUSTED_ORIGINS = ['https://unsyncopated-shufflingly-gerald.ngrok-free.dev']
 ALLOWED_HOSTS = ['*','https://*.ngrok-free.dev',BASE_BACKEND_URL]
 MEDIA_URL = '/media/'
 MEDIA_ROOT= BASE_DIR / "media"
@@ -35,6 +38,20 @@ SWAGGER_YAML_FILE=''
 QR_BASE_URL=BASE_BACKEND_URL
 BOT_USERNAME = 'feri_event_test_bot'
 
+CELERY_BROKER_URL = os.getenv("REDIS_URL")
+CELERY_RESULT_BACKEND = os.getenv("REDIS_URL")
+CELERY_TIMEZONE = "Europe/Vienna"
+CELERY_TASK_ALWAYS_EAGER = False  # в проді False
+
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    "outbox-tick-15s": {
+        "task": "core.tasks.outbox_tick",
+        "schedule": 15.0,
+        "args": (200,),
+    }
+}
 
 
 REST_FRAMEWORK = {
@@ -93,7 +110,7 @@ WSGI_APPLICATION = 'djangoProject.wsgi.application'
 
 CELERY_BEAT_SCHEDULE = {
     "outbox-tick-15s": {
-        "task": "core.task.outbox_tick",
+        "task": "core.tasks.outbox_tick",
         "schedule": 15.0,
     }
 }
@@ -150,3 +167,22 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}

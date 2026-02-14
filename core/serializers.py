@@ -5,7 +5,7 @@ from .models import TgUser, Event, Payment, Ticket
 class TgUserSerializer(serializers.ModelSerializer):
     class Meta:
         model = TgUser
-        fields = ("id", "full_name", "has_paid_once")
+        fields = ("id",'tg_id', "full_name", "has_paid_once",'username','age','phone','email')
 
 
 class TgUserCreateSerializer(serializers.Serializer):
@@ -21,6 +21,9 @@ class TgUserCheckSerializer(serializers.Serializer):
     tg_id = serializers.IntegerField()
     username = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     full_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    age = serializers.IntegerField(required=False,allow_null=True)
+    email = serializers.CharField(required=False)
+    phone = serializers.CharField(required=False)
 
 
 class EventForBotSerializer(serializers.ModelSerializer):
@@ -30,6 +33,7 @@ class EventForBotSerializer(serializers.ModelSerializer):
             "id",
             "title",
             "welcome_text",
+            "description",
             "price",
             "original_price_until",
             "new_price_from",
@@ -40,7 +44,6 @@ class EventForBotSerializer(serializers.ModelSerializer):
 
 
 # serializers.py
-from rest_framework import serializers
 
 
 class PaymentCreateSerializer(serializers.Serializer):

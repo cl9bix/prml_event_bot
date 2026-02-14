@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import F
 from django.shortcuts import get_object_or_404
@@ -28,9 +29,9 @@ from .serializers import (
 from .google_sheet import send_registration_to_google_sheets
 from .monobank import mono_create_invoice, verify_mono_webhook_signature
 from .ticket import generate_ticket
-from .services import refresh_payment_from_mono
+from .services.payment_handlers import refresh_payment_from_mono
 
-
+logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class MonoWebhookStatus:
     SUCCESS: tuple[str, ...] = ("success",)
@@ -57,17 +58,6 @@ def tg_check_user(request):
 
     if not user:
         return Response({"ok": True, "exists": False, "user": None})
-
-    # changed = False
-    # for field in ("username","full_name"):
-    #     new_val = data.get(field)
-    #     if getattr(user, field) != new_val:
-    #         setattr(user, field, new_val)
-    #         changed = True
-
-    # if changed:
-    #     user.save(update_fields=["username", "full_name"])
-
     return Response({"ok": True, "exists": True, "user": TgUserSerializer(user).data})
 
 
@@ -153,32 +143,58 @@ def promo_check(request):
         )
 
     price = Decimal(str(event.price))
+
+    if promo.percentage >= 100:
+        return Response({
+            "ok": True,
+            "promo": {
+                "code": promo.code,
+                "percentage": promo.percentage,
+            },
+            "original_amount": str(price),
+            "discount_amount": str(price),
+            "final_amount": "0.00",
+            "is_free": True,
+        })
+
     discount = (price * Decimal(promo.percentage) / Decimal("100")).quantize(
         Decimal("0.01"), rounding=ROUND_HALF_UP
     )
-    final_price = (price - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    final_price = (price - discount).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+
     if final_price < Decimal("0.00"):
         final_price = Decimal("0.00")
 
     return Response({
         "ok": True,
-        "promo": {"code": promo.code, "percentage": promo.percentage},
+        "promo": {
+            "code": promo.code,
+            "percentage": promo.percentage,
+        },
         "original_amount": str(price),
-        "final_amount": str(final_price),
         "discount_amount": str(discount),
+        "final_amount": str(final_price),
+        "is_free": final_price == Decimal("0.00"),
     })
 
 
+
+from django.db import transaction
 @api_view(["POST"])
 def payment_create(request):
     s = PaymentCreateSerializer(data=request.data)
     s.is_valid(raise_exception=True)
     data = s.validated_data
 
-    event = get_object_or_404(Event, id=data["event_id"])
+    event = get_object_or_404(Event, id=data["event_id"], is_active=True)
+
     user = None
     extra: dict[str, Any] = {}
 
+    # 1) user або extra
     if data.get("user_id"):
         user = get_object_or_404(TgUser, id=data["user_id"])
     else:
@@ -187,21 +203,91 @@ def payment_create(request):
             "username": data.get("username"),
             "full_name": data.get("full_name"),
             "reg_data": data.get("reg_data", {}),
-            "final_amount": data.get("final_amount"),
         }
 
-    amount = data.get("final_amount", event.price)
+    promo_code_raw = (data.get("promo_code") or "").strip()
+    promo = None
+    discount_percent = 0
+    original_amount = Decimal(str(event.price))
+    final_amount = Decimal(str(data.get("final_amount") or event.price))
 
-    payment = Payment.objects.create(
-        user=user,
-        event=event,
-        amount=amount,
-        status="pending",
-        provider="monobank",
-        extra=extra,
-    )
+    # 2) якщо промо передали — валідуємо і нормалізуємо amount
+    if promo_code_raw:
+        promo = PromoCode.objects.filter(
+            code__iexact=promo_code_raw,
+            is_available=True,
+            valid_until__gte=timezone.now()
+        ).first()
 
-    tg_id = user.tg_id if user else extra.get("tg_id")
+        if not promo:
+            return Response({"ok": False, "error": "Promo invalid"}, status=404)
+
+        discount_percent = int(promo.percentage or 0)
+
+        # якщо фронт прислав final_amount — ок, але ми все одно зафіксуємо is_free по проценту/сумі
+        # (захист від підміни: якщо у промо 100 — точно free)
+        if discount_percent >= 100:
+            final_amount = Decimal("0.00")
+        else:
+            # на всяк: якщо прислали final_amount, але він <0 -> 0
+            if final_amount < Decimal("0.00"):
+                final_amount = Decimal("0.00")
+
+    # 3) FREE кейс: final_amount == 0.00 -> не робимо інвойс, одразу success + квиток
+    is_free = (final_amount == Decimal("0.00"))
+
+    with transaction.atomic():
+        payment = Payment.objects.create(
+            user=user,
+            event=event,
+            amount=final_amount,                 # 0.00
+            status="success" if is_free else "pending",
+            provider="promo" if is_free else "monobank",
+            provider_payment_id=None,
+            promo_code=promo,
+            discount_percent=discount_percent,
+            original_amount=original_amount,
+            extra={
+                **(extra or {}),
+                "final_amount": str(final_amount),
+                "is_free": is_free,
+                "promo_code": promo.code if promo else None,
+            },
+        )
+
+        # якщо free — одразу “оплата успішна”, лічильники, квиток
+        if is_free:
+            if promo:
+                promo.uses_count = promo.uses_count + 1
+                promo.save(update_fields=["uses_count"])
+
+            if user:
+                user.has_paid_once = True
+                user.save(update_fields=["has_paid_once"])
+
+
+
+            from .ticket import generate_ticket
+            ticket = generate_ticket(full_name=payment.user.full_name,date_text=payment.event.start_at.strftime("%d.%m / %H:%M"))
+            """
+            full_name: "Ніна Мацюк"
+            date_text: "21.03 / 9:30" (або будь-який формат, який хочеш показати)
+            """
+
+
+
+            return Response(
+                {
+                    "ok": True,
+                    "is_free": True,
+                    "payment": PaymentSerializer(payment, context={"request": request}).data,
+                    "invoice": None,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+    # 4) Звичайний кейс: генеруємо інвойс
+    tg_id = user.tg_id if user else (extra or {}).get("tg_id")
     reference = f"Оплата в Telegram | telegramId:{tg_id}; pay:{payment.id}"
     webhook_url = request.build_absolute_uri(reverse("mono_webhook"))
 
@@ -225,12 +311,12 @@ def payment_create(request):
     return Response(
         {
             "ok": True,
+            "is_free": False,
             "payment": PaymentSerializer(payment, context={"request": request}).data,
             "invoice": invoice,
         },
         status=status.HTTP_201_CREATED,
     )
-
 
 @api_view(["GET"])
 def payment_check(request):
@@ -387,3 +473,102 @@ def trigger_event_messages(request):
     )
 
     return Response({"ok": True})
+
+import os
+import tempfile
+import logging
+import requests
+from core.service_email import send_ticket_email
+@api_view(["POST"])
+def send_email_confirmation(request):
+    payment_id = request.data.get("payment_id")
+    ticket_url = (request.data.get("ticket_url") or "").strip()
+
+    if not payment_id:
+        return Response(
+            {"ok": False, "error": "payment_id is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    payment = Payment.objects.select_related("user", "event").filter(id=payment_id).first()
+    if not payment:
+        return Response(
+            {"ok": False, "error": "payment not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # ========================
+    # EMAIL DATA
+    # ========================
+    if payment.user:
+        to_email = payment.user.email
+        user_name = payment.user.full_name
+    else:
+        extra = payment.extra or {}
+        reg_data = extra.get("reg_data", {})
+        to_email = reg_data.get("email") or extra.get("email")
+        user_name = reg_data.get("full_name") or extra.get("full_name")
+
+    if not to_email:
+        return Response(
+            {"ok": False, "error": "recipient email not found"},
+            status=400,
+        )
+
+    event_name = payment.event.title
+    event_dt = (
+        payment.event.start_at.strftime("%d.%m / %H:%M")
+        if payment.event.start_at
+        else ""
+    )
+
+    # ========================
+    # 🔥 ВАРІАНТ A: беремо ticket_url з POST
+    # ========================
+    if not ticket_url:
+        return Response(
+            {"ok": False, "error": "ticket_url not provided"},
+            status=400,
+        )
+
+    logger.info(
+        "send_email_confirmation | payment_id=%s | ticket_url=%s",
+        payment_id,
+        ticket_url,
+    )
+
+    try:
+        resp = requests.get(ticket_url, timeout=20)
+        resp.raise_for_status()
+
+        content_type = resp.headers.get("Content-Type", "").lower()
+        ext = ".pdf" if "pdf" in content_type else ".jpg"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        ok = send_ticket_email(
+            to_email=to_email,
+            user_name=user_name or "друже",
+            event_name=event_name,
+            date=event_dt,
+            ticket_path=tmp_path,
+        )
+
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            logger.warning("Temp file not removed: %s", tmp_path)
+
+        if not ok:
+            return Response(
+                {"ok": False, "error": "email sending failed"},
+                status=500,
+            )
+
+        return Response({"ok": True})
+
+    except Exception as e:
+        logger.exception("send_email_confirmation error | %s", e)
+        return Response({"ok": False, "error": "server error"}, status=500)

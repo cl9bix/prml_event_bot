@@ -29,6 +29,8 @@ urlpatterns = [
     path("api/tickets/my/", views.tickets_my, name="tickets_my"),
 
     path("messages/trigger/", views.trigger_event_messages, name="trigger_event_messages"),
+
+    path("api/send-email-confirmation/",views.send_email_confirmation,name="email_confirmation")
 ]
 
 

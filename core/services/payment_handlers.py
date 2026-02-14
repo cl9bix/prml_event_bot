@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.utils import timezone
 
-from .monobank import mono_invoice_status
+from core.monobank import mono_invoice_status
 
 
 def map_mono_to_local(status_mono: str) -> str:

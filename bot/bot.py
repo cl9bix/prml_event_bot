@@ -1,19 +1,17 @@
-import datetime
+import asyncio
 import logging
 import os
-import asyncio
 import time
-from bdb import effective
 from typing import Dict, Any, Optional
-from urllib.parse import quote
 
 import requests
-from kombu.serialization import raw_encode
+from dotenv import load_dotenv
 from telegram import (
     Update,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -23,8 +21,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.constants import ChatAction
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -47,6 +43,7 @@ API_USER_TICKETS = f"{DJANGO_BASE_URL}/api/tickets/my/"
 API_CONFIRM_MONO = f"{DJANGO_BASE_URL}/api/payments/confirm_monobank/"
 API_PAYMENTS_CONFIG = f'{DJANGO_BASE_URL}/api/payments/config/'
 API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/payments/history/'
+API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/email-confirmation/send/'
 
 # Monobank
 MONO_TOKEN = os.getenv("MONO_TOKEN", "")
@@ -142,6 +139,19 @@ def check_payment_monobank(payment_id: int) -> Dict[str, Any]:
     )
 
 
+def send_email_confirmation() -> Dict[str, Any]:
+    return api_get_json("POST", API_PAYMENTS_HISTORY,)
+
+
+
+async def CustomMessageSender(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, kb: list = None,
+                              reply_text: bool = False, parse_mode: str = None):
+    q = update.callback_query
+    if reply_text:
+        return await q.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=parse_mode)
+    return await q.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=parse_mode)
+
+
 def get_ticket(payment_id: int) -> Dict[str, Any]:
     return api_get_json("GET", API_GET_TICKET, params={"payment_id": payment_id})
 
@@ -160,8 +170,8 @@ def get_promo(code: str, event_id: int) -> Dict[str, Any]:
 
 async def ask_promo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Є промокод", callback_data="promo_yes")],
-        [InlineKeyboardButton("Немає 🙂", callback_data="promo_no")],
+        [InlineKeyboardButton("Продовжити без промокоду", callback_data="promo_no")],
+        [InlineKeyboardButton("Так є промокод 🎁", callback_data="promo_yes")],
     ])
 
     msg = update.callback_query.message if update.callback_query else update.message
@@ -194,7 +204,7 @@ async def promo_no(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def promo_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = (update.message.text or "").strip().upper()
     context.user_data["promo_code"] = code
-    await update.message.reply_text(f"Прийняв промокод: <code>{code}</code> ✅\nЗараз сформую оплату…",
+    await update.message.reply_text(f"Прийняв промокод: <code>{code}</code> ✅\nПеревіряю…",
                                     parse_mode="HTML")
     return await start_payment_flow(update, context)
 
@@ -227,11 +237,13 @@ def event_price_uah(event: dict) -> int:
 
 
 def nice_event_card(event: dict) -> str:
+    logger.info("EVENT DATA=%s", event)
     start_at = event.get("start_at") or ""
     return (
         f"✨ <b>{event.get('title', 'Івент')}</b>\n"
         f"{event.get('welcome_text', '')}\n\n"
-        f"💳 Вартість: <b>{event.get('price', '—')} грн</b>\n"
+        f"{event.get('description', '')}\n\n"
+        f"Вартість: <b>{event.get('price', '—')} грн</b>\n"
         f"{('🗓️ ' + start_at) if start_at else ''}"
     ).strip()
 
@@ -263,9 +275,10 @@ def _extract_user_id(message_or_query, fallback_update: Update | None = None) ->
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
+    context.user_data.clear()
 
     await typing(update, 0.7)
-    await update.message.reply_text("Привіт! 👋 Зараз швидко все налаштую…")
+    await update.message.reply_text("Привіт! Це ПРМЛ бот, який допоможе тобі стати учасником наших подій⚡️")
 
     await typing(update, 0.5)
     resp = check_user(user)
@@ -283,14 +296,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(f"Радий бачити знову, {backend_user.get('full_name', user.first_name)}! 🔥")
     else:
         await update.message.reply_text(
-            "Схоже, ти вперше тут 🙂\n"
-            "Зробимо все за 60 секунд: 1) обираєш подію 2) оплата 3) квиток 🎫"
+            "То що, давай реєструватися?"
         )
 
     return await show_events(update, context)
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎉 Івенти", callback_data="menu_events")],
         [
@@ -318,8 +332,9 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     tg_id = query.from_user.id
-    user = {'tg_id': tg_id, 'username': update.effective_user.username}
+    user = update.effective_user
     user_q = check_user(user)
+    logger.info('Getting user from db [menu_profile].\nUser_data=%s', user_q)
     if user_q['exists'] is not True:
         return await query.message.reply_text(
             "Ви не зареєструвались!"
@@ -330,58 +345,78 @@ async def menu_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     userName = user_q['user']['full_name']
     userAge = user_q['user']['age']
     userPhone = user_q['user']['phone']
-    userEmail = user_q['user']['full_name']
+    userEmail = user_q['user']['email']
     userUsername = user_q['user']['username']
     userTgId = user_q['user']['tg_id']
-    return await query.message.reply_text(
-        f"Ім`я: <b>{userName}</b>"
-        f"Вік: <b>{userAge}</b>"
-        f"Номер телефону: <b>{userPhone}</b>"
-        f"Email: <b>{userEmail}</b>"
-        f"username: <b>{userUsername}</b>"
+    text = f"""
+Повне ім`я: [<b>{userName}</b>]
+Вік: [<b>{userAge}</b>]
+Номер телефону: [<b>{userPhone}</b>]
+Email: [<b>{userEmail}</b>]
+Username: [<b>{userUsername}</b>]
+Telegram Id: [<b>{userTgId}</b>]"""
 
-        f"telegram id: </b>{userTgId}</b>", parse_mode="HTML"
-    )
+    return await CustomMessageSender(update, context, text, kb, parse_mode="HTML")
 
 
 async def menu_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    kb = [
+        [InlineKeyboardButton("Назад", callback_data='menu')]
+    ]
 
-    await query.message.edit_text(
-        "ℹ️ Ми організовуємо круті подіїи.\n\n"
-        "Мета — якісне комʼюніті та атмосфера."
-    )
+    text = f"""
+<b>Привіт!</b> 👋
+
+Ми <b>ПРМЛ</b> - місце, де навчання формує, спільнота збудовує, а знання - практично застосовуються.
+
+    <b>Підписуйся на нас:</b>
+
+    🔸 <a href="https://www.instagram.com/prml.ua?igsh=MWJ0NTF3bDNzd3ExNw==">Instagram PRML</a>  
+    🔸 <a href="https://youtube.com/@prml_ua?si=A9aSmPTFxEeEeM5s">YouTube PRML</a>  
+    🔸 <a href="https://ubts.org.ua/programy/programa-rozvytu-molodyh-lideriv/">Сайт платформи (УБТС)</a>
+    """
+    await CustomMessageSender(update, context, text, kb, parse_mode="HTML")
 
 
 async def menu_values(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    kb = [
+        [InlineKeyboardButton("Назад", callback_data="menu")]
+    ]
+    text = f"""
+Ми хочемо, щоб відбулася трансформація суспільства, але розуміємо, що це безпосередньо залежить від якості того, хто буде звершувати трасформацію.
 
-    await query.message.edit_text(
-        "💎 Наші цінності:\n\n"
-        "• Якість\n"
-        "• Комʼюніті\n"
-        "• Атмосфера\n"
-        "• Відповідальність"
-    )
+Саме тому - це місце твого розвитку! 
+Місце, де навчання збудовує.
+Місце, де події несуть сенси.
+Місце, де люди підтримують один одного.
+Місце, де побувши раз - відчуваєш себе частинкою спільноти назавжди.
+
+"""
+    await query.message.edit_text(text=text, reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def show_events(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await typing(update, 0.4)
     resp = get_events()
+    logger.info("Gettings get_events=%s", resp)
     if not resp.get("ok"):
         await update.effective_message.reply_text("Не можу отримати список подій 😢")
         return ConversationHandler.END
 
     events = resp.get("events", [])
+    logger.info("Gettings all events=%s", resp.get("events"))
+
     if not events:
         await update.effective_message.reply_text("Зараз немає активних подій.")
         return ConversationHandler.END
 
     context.user_data["events"] = {e["id"]: e for e in events}
 
-    keyboard = [[InlineKeyboardButton(f"🎉 {e['title']}", callback_data=f"event_{e['id']}")] for e in events]
+    keyboard = [[InlineKeyboardButton(f"{e['title']}", callback_data=f"event_{e['id']}")] for e in events]
     await update.effective_message.reply_text(
         "Обери подію 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -417,7 +452,7 @@ async def event_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         context.user_data['reg_data']['tg_id'] = user.id
         await query.message.reply_text("Тепер — міні-реєстрація ")
         await typing(update, 0.5)
-        await query.message.reply_text("Як тебе звати? 🙂")
+        await query.message.reply_text("Вкажи свої персональні дані:\nІм'я та призвіще")
 
         return REG_NAME
     await query.message.reply_text("Перейдемо одразу до оплати!")
@@ -428,7 +463,7 @@ async def event_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     get_user_full_name: str = update.message.text.strip()
-    if len(get_user_full_name.split(' ')) < 2:
+    if len(get_user_full_name.split(' ')) != 2:
         await update.message.reply_text("Введи будь-ласка своє повне ім'я! (приклад: Тарас Шевченко)")
         return REG_NAME
 
@@ -487,8 +522,8 @@ async def reg_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ===== Payment =====
 
+
 async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    backend_user = context.user_data.get("backend_user")
     event = context.user_data.get("chosen_event")
     tg_user = update.effective_user
     reg_data = context.user_data.get("reg_data") or check_user(update.effective_user) or None
@@ -497,23 +532,35 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Івент загубився 😅 Почни /start")
         return ConversationHandler.END
 
+    # якщо ще не питали промо
     if "promo_code" not in context.user_data:
         return await ask_promo(update, context)
 
     payload: Dict[str, Any] = {"event_id": event["id"]}
     price = event_price_uah(event)
-    promo_code = context.user_data.get("promo_code", None)
-    if promo_code is not None:
-        payload["promo_code"] = promo_code
-        promo_check = get_promo(code=promo_code, event_id=payload['event_id'])
-        if not promo_check.get('ok'):
-            await update.effective_message.reply_text("Не можу знайти промокод :(\n\nСпробуй ще раз!")
-            return ASK_PROMO
-        final_amount = promo_check['final_amount']
-        payload['final_amount'] = final_amount
+
+    promo_code = context.user_data.get("promo_code")  # рядок або None
+    promo_check = None
+    final_amount = None
+
+    # 1) promo check
+    if promo_code:
+        promo_check = get_promo(code=promo_code, event_id=payload["event_id"])
+        if not promo_check.get("ok"):
+            await update.effective_message.reply_text(
+                "Не можу знайти промокод :(\n\nПродовжую без промокоду"
+            )
+            context.user_data.pop("promo_code", None)
+            promo_code = None
+        else:
+            final_amount = promo_check.get("final_amount")
+            payload["promo_code"] = promo_code
+            payload["final_amount"] = final_amount
+
+    # 2) user data (backend user)
     try:
         backend_user = check_user(update.effective_user)
-        user_id = backend_user['user']['id']
+        user_id = backend_user["user"]["id"]
         payload.update({
             "user_id": user_id,
             "tg_id": tg_user.id,
@@ -525,45 +572,63 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.warning("ERROR by start_payment_flow=%s", e)
 
     await typing(update, 0.5)
+
+    # ✅ ОДИН виклик create_payment
     resp = create_payment(payload)
+
     if not resp.get("ok"):
         await update.effective_message.reply_text("Не вдалось створити платіж 😢 Спробуй пізніше.")
         context.user_data.pop("promo_code", None)
         return ConversationHandler.END
 
+    # завжди зберігаємо payment
     payment = resp.get("payment", {})
-    context.user_data["payment"] = payment
+    if payment:
+        context.user_data["payment"] = payment
+
+    # =======================
+    # ✅ FREE CASE (100% promo)
+    # =======================
+    if resp.get("is_free") is True or payment.get("provider") == "promo":
+        msg = update.callback_query.message if update.callback_query else update.message
+        await msg.reply_text(
+            "🎉 Промокод покрив 100% вартості!\n"
+            "Оплата не потрібна ✅\n"
+            "Перевіряю доступ до групи й видаю квиток… 🎫"
+        )
+        return await gate_group_then_ticket(msg, context)
+
+    # =======================
+    # NORMAL PAYMENT FLOW
+    # =======================
     provider = payment.get("provider", "unknown")
 
     invoice = resp.get("invoice") or {}
     invoice_data = invoice.get("invoiceData") or {}
     payment_link = invoice_data.get("pageUrl")
-    logger.info("[EVENT_data]==%s", event)
 
-    if provider == "monobank":
-        text = (
-            "<b>Крок 2 з 3: оплата.</b>\n\n"
-        )
+    text = "<b>Крок 2 з 3: оплата.</b>\n\n"
 
-    if promo_code:
+    if promo_code and promo_check:
         text += (
             f"Промокод: <code>{promo_code}</code> 🎁\n"
             f"Вартість конференції: <s>{price} грн</s>  <b>{final_amount} гривень</b>\n"
         )
     else:
-        new_price_value: str = event['new_price_value']
-        text += f"Вартість конференції:\n<b>{price} гривень - {event['original_price_until']}</b>\n<b>{new_price_value.removesuffix('.00')} гривень - {event['new_price_from']}</b>"
+        new_price_value: str = event["new_price_value"]
+        text += (
+            f"Вартість конференції:\n"
+            f"<b>{price} гривень - {event['original_price_until']}</b>\n"
+            f"<b>{new_price_value.removesuffix('.00')} гривень - {event['new_price_from']}</b>"
+        )
 
     text += (
         "\n\n"
         "Оплату можна здійснити комфортним способом онлайн, натиснувши кнопку нижче\n"
         "Після оплати натисни «✅ Я оплатив(ла)» і твій індивідуальний квиток з’явиться нижче."
         "\n\n"
-        "\n\n"
-        "<b>З важливого:</b>\n"
-        "згідно з нашою політикою щодо повернення коштів поділимося з тобою декількома правилами:\n\n"
-        "  -  Повернення <b>100%</b> вартості квитка можливе лише за умови звернення не пізніше ніж за <b>10</b> днів до початку події.\n\n"
-        "  -  Менш ніж за <b>14</b> днів до початку події повернення коштів не здійснюється, проте ви можете передати свій квиток іншій особі, повідомивши про це організаторів."
+        "<b>З важливого:</b>\n\n"
+        "<i>  -  Відповідно до законодавства України та умов продажу квитків, вартість квитків не повертається. Якщо ви не можете відвідати захід, не пізніше ніж за 10 днів до його початку ви можете переоформити квиток через організатора на іншу особу. Для цього потрібно завчасно зв’язатись із організатором та надати дані нового учасника.</i>"
     )
 
     kb_rows = []
@@ -576,6 +641,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return WAITING_PAYMENT
 
 
+
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -585,11 +651,15 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await query.message.reply_text("Платіж не знайдено 😕 Почни /start")
         return ConversationHandler.END
 
-    await query.answer("Перевіряю оплату… ⏳")
-    await asyncio.sleep(1)
-
     provider = payment.get("provider", "unknown")
     payment_id = int(payment.get("id"))
+
+    if provider == "promo":
+        await query.answer("Оплата не потрібна ✅ Видаю квиток… 🎫")
+        return await gate_group_then_ticket(query, context)
+
+    await query.answer("Перевіряю оплату… ⏳")
+    await asyncio.sleep(1)
 
     # ================= MONOBANK =================
     if provider == "monobank":
@@ -597,7 +667,8 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         if not resp.get("ok"):
             await query.answer(
-                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.", show_alert=True
+                "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.",
+                show_alert=True,
             )
             return WAITING_PAYMENT
 
@@ -615,12 +686,9 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             return await gate_group_then_ticket(query, context)
 
         if status == "pending":
-            await query.message.reply_text(
-                "Поки не бачу підтвердження 🙏 Спробуй ще раз через хвильку.",
-            )
+            await query.message.reply_text("Поки не бачу підтвердження 🙏 Спробуй ще раз через хвильку.")
             return WAITING_PAYMENT
 
-        # failed / canceled
         await query.message.reply_text("Схоже, оплата не пройшла 😕")
         return ConversationHandler.END
 
@@ -628,9 +696,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     resp = check_payment_status(payment_id)
 
     if not resp.get("ok"):
-        await query.message.reply_text(
-            "Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше."
-        )
+        await query.message.reply_text("Не можу перевірити оплату зараз 😅 Спробуй ще раз трохи пізніше.")
         return WAITING_PAYMENT
 
     payment_data = resp.get("payment", {})
@@ -647,14 +713,11 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return await gate_group_then_ticket(query, context)
 
     if status == "pending":
-        await query.message.reply_text(
-            "Поки що не бачу підтвердження 🙏 Спробуй ще раз через хвильку.",
-        )
+        await query.message.reply_text("Поки що не бачу підтвердження 🙏 Спробуй ще раз через хвильку.")
         return WAITING_PAYMENT
 
-    await query.message.reply_text("Схоже, оплата не пройшла 😕", )
+    await query.message.reply_text("Схоже, оплата не пройшла 😕")
     context.user_data.pop("promo_code", None)
-
     return ConversationHandler.END
 
 
@@ -749,6 +812,7 @@ async def gate_group_then_ticket(message_or_query, context: ContextTypes.DEFAULT
     if in_group:
         msg = "✅ Крок 3/3: Доступ підтверджено. Видаю квиток… 🎫"
         if hasattr(message_or_query, "edit_message_text"):
+            await asyncio.sleep(0.5)
             await message_or_query.edit_message_text(msg)
         else:
             await message_or_query.reply_text(msg)
@@ -801,7 +865,7 @@ async def check_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     ok = await is_user_in_required_group(context, int(required_group_id), int(query.from_user.id))
     if not ok:
-        await query.edit_message_text(
+        await query.message.reply_text(
             "Ще не бачу тебе в групі 😅\n"
             "Зайди за лінком і спробуй ще раз."
         )
@@ -812,32 +876,45 @@ async def check_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return await send_ticket(query, context)
 
 
+
 async def send_ticket(message_or_query, context: ContextTypes.DEFAULT_TYPE) -> int:
     payment = context.user_data.get("payment")
-    if not payment:
+
+    if not payment or not payment.get("id"):
         if hasattr(message_or_query, "edit_message_text"):
             await message_or_query.edit_message_text("Платіж не знайдено 😕")
         else:
             await message_or_query.reply_text("Платіж не знайдено 😕")
         return ConversationHandler.END
 
-    resp = get_ticket(payment["id"])
+    resp = get_ticket(int(payment["id"]))
     if not resp.get("ok"):
         if hasattr(message_or_query, "edit_message_text"):
-            await message_or_query.edit_message_text("Не можу отримати квиток зараз 😔 Спробуй трохи пізніше.")
+            await message_or_query.edit_message_text(
+                "Не можу отримати квиток зараз 😔 Спробуй трохи пізніше."
+            )
         else:
-            await message_or_query.reply_text("Не можу отримати квиток зараз 😔 Спробуй трохи пізніше.")
+            await message_or_query.reply_text(
+                "Не можу отримати квиток зараз 😔 Спробуй трохи пізніше."
+            )
         return ConversationHandler.END
 
     ticket = resp.get("ticket", {})
     image_url = ticket.get("image_url")
 
+    if not image_url:
+        logger.warning("send_ticket: image_url missing | payment_id=%s", payment["id"])
+        return ConversationHandler.END
+
     caption = (
         "🎫 Ось твій квиток!\n"
-        "Збережи його — і побачимось на подіїі 🔥"
+        "Збережи його — і побачимось на події 🔥"
     )
 
     try:
+        # ==========================
+        # 1️⃣ Надсилаємо квиток у Telegram
+        # ==========================
         r = requests.get(image_url, timeout=10)
         r.raise_for_status()
         img_bytes = r.content
@@ -847,14 +924,65 @@ async def send_ticket(message_or_query, context: ContextTypes.DEFAULT_TYPE) -> i
             await message_or_query.message.reply_photo(photo=img_bytes, caption=caption)
         else:
             await message_or_query.reply_photo(photo=img_bytes, caption=caption)
+
+        # ==========================
+        # 2️⃣ Тепер шлемо email (Варіант A — передаємо ticket_url)
+        # ==========================
+        payment_id = payment.get("id")
+        if payment_id:
+            try:
+                API_BASE_URL = os.getenv("API_BASE_URL")
+                url = f"{API_BASE_URL}/api/send-email-confirmation/"
+
+                resp = requests.post(
+                    url,
+                    json={
+                        "payment_id": payment_id,
+                        "ticket_url": image_url  #
+                    },
+                    timeout=15
+                )
+
+                logger.info(
+                    "Email API response | status=%s | text=%s",
+                    resp.status_code,
+                    resp.text[:300]
+                )
+
+                data = {}
+                if resp.headers.get("Content-Type", "").startswith("application/json"):
+                    data = resp.json()
+
+                if resp.status_code == 200 and data.get("ok"):
+                    logger.info("Email confirmation sent | payment_id=%s", payment_id)
+                else:
+                    logger.warning(
+                        "Email confirmation failed | payment_id=%s | status=%s | data=%s",
+                        payment_id,
+                        resp.status_code,
+                        data
+                    )
+
+            except Exception as e:
+                logger.exception(
+                    "Email confirmation request error | payment_id=%s | %s",
+                    payment_id,
+                    e
+                )
+
     except Exception as e:
-        logger.exception("Ticket download error: %s", e)
+        logger.exception("Ticket download/send error: %s", e)
         if hasattr(message_or_query, "edit_message_text"):
-            await message_or_query.edit_message_text("Квиток згенеровано, але картинку не можу завантажити 😔")
+            await message_or_query.edit_message_text(
+                "Квиток згенеровано, але картинку не можу завантажити 😔"
+            )
         else:
-            await message_or_query.reply_text("Квиток згенеровано, але картинку не можу завантажити 😔")
+            await message_or_query.reply_text(
+                "Квиток згенеровано, але картинку не можу завантажити 😔"
+            )
 
     return ConversationHandler.END
+
 
 
 # ===== Extra =====
@@ -947,7 +1075,7 @@ def main() -> None:
     # application.add_handler(MessageHandler(filters.ALL, debug_group))
     application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler("menu", pattern="^menu$"))
+    application.add_handler(CallbackQueryHandler(menu, pattern="^menu$"))
     application.add_handler(CallbackQueryHandler(menu_profile, pattern="^menu_profile$"))
     application.add_handler(CallbackQueryHandler(menu_about, pattern="^menu_about$"))
     application.add_handler(CallbackQueryHandler(menu_values, pattern="^menu_values$"))
