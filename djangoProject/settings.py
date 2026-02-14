@@ -31,7 +31,7 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = True
 CSRF_TRUSTED_ORIGINS = ['https://admin_event.prml.in.ua']
-ALLOWED_HOSTS = ['*','https://admin_event.prml.in.ua',BASE_BACKEND_URL]
+ALLOWED_HOSTS = ['*','admin_event.prml.in.ua']
 STATIC_URL = "/static/"
 STATIC_ROOT = "/app/staticfiles"
 MEDIA_URL = '/media/'
