@@ -321,25 +321,61 @@ def payment_create(request):
 @api_view(["GET"])
 def payment_check(request):
     payment_id = request.query_params.get("payment_id")
-    refresh = request.query_params.get("refresh") == "1"
+    refresh = True
+
+    logger.info("🔎 payment_check called | payment_id=%s | refresh=%s", payment_id, refresh)
+
     if not payment_id:
+        logger.warning("❌ payment_check without payment_id")
         return Response({"ok": False, "error": "payment_id is required"}, status=400)
 
     payment = get_object_or_404(Payment, id=payment_id)
 
+    logger.info(
+        "📦 Current payment state | id=%s | status=%s | provider=%s | provider_payment_id=%s",
+        payment.id,
+        payment.status,
+        payment.provider,
+        payment.provider_payment_id,
+    )
+
     if refresh and payment.status == "pending" and payment.provider == "monobank" and payment.provider_payment_id:
-        # throttle: не частіше ніж раз на 8 секунд
         last = getattr(payment, "last_provider_sync_at", None)
+
+        logger.info("⏳ Attempting refresh from Monobank...")
+
         if not last or (timezone.now() - last).total_seconds() > 8:
             try:
-                refresh_payment_from_mono(payment)
+                old_status = payment.status
+
+                changed = refresh_payment_from_mono(payment)
                 payment.refresh_from_db()
-            except Exception:
-                # якщо mono впав — просто віддаємо як є
-                pass
 
-    return Response({"ok": True, "payment": PaymentSerializer(payment, context={"request": request}).data})
+                logger.info(
+                    "✅ Monobank refresh done | changed=%s | old_status=%s | new_status=%s",
+                    changed,
+                    old_status,
+                    payment.status,
+                )
 
+                if payment.extra:
+                    logger.info(
+                        "📡 Mono payload status=%s",
+                        payment.extra.get("mono_status")
+                    )
+
+            except Exception as e:
+                logger.exception("💥 Monobank refresh failed: %s", str(e))
+        else:
+            logger.info("🚫 Refresh skipped due to throttle")
+
+    else:
+        logger.info("ℹ️ Refresh conditions not met")
+
+    return Response({
+        "ok": True,
+        "payment": PaymentSerializer(payment, context={"request": request}).data
+    })
 
 @api_view(["GET"])
 def ticket_get(request):
