@@ -29,7 +29,8 @@ SECRET_KEY = 'django-insecure-ztb!aybhg#_7gp0_pp(bb+%xcti(6clp_m_!w*su+y!0(=0+es
 # SECURITY WARNING: don't run with debug turned on in production!
 
 BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
-DEBUG = False
+DEBUG = True
+
 CSRF_TRUSTED_ORIGINS = ['https://admin-event.prml.in.ua','http://195.54.178.243','http://127.0.0.1']
 ALLOWED_HOSTS = [".prml.in.ua",'127.0.0.1','195.54.178.243']
 STATIC_URL = '/static/'
