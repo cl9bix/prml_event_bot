@@ -32,7 +32,7 @@ BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = False
 
 CSRF_TRUSTED_ORIGINS = ['https://admin-event.prml.in.ua','http://195.54.178.243','http://127.0.0.1']
-ALLOWED_HOSTS = [".prml.in.ua",'127.0.0.1','195.54.178.243',"backend:8200"]
+ALLOWED_HOSTS = [".prml.in.ua",'127.0.0.1','195.54.178.243',"backend"]
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
