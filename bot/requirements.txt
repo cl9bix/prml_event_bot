@@ -76,3 +76,4 @@ python-dotenv
 celery
 redis
 kombu
+whitenoise
