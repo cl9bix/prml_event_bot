@@ -32,10 +32,10 @@ BASE_BACKEND_URL = os.getenv("DJANGO_BASE_URL")
 DEBUG = False
 CSRF_TRUSTED_ORIGINS = ['https://admin-event.prml.in.ua','http://195.54.178.243','http://127.0.0.1']
 ALLOWED_HOSTS = [".prml.in.ua",'127.0.0.1','195.54.178.243']
-STATIC_URL = "/static/"
-STATIC_ROOT = "/app/staticfiles"
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
-MEDIA_ROOT = "/app/media"
+MEDIA_ROOT = BASE_DIR / 'media'
 SWAGGER_YAML_FILE=''
 QR_BASE_URL=BASE_BACKEND_URL
 BOT_USERNAME = 'prml_event_bot'
@@ -89,6 +89,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
 
 ROOT_URLCONF = 'djangoProject.urls'
 
