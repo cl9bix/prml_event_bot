@@ -135,7 +135,7 @@ def check_payment_monobank(payment_id: int) -> Dict[str, Any]:
     return api_get_json(
         "GET",
         API_CHECK_PAYMENT,
-        params={"payment_id": payment_id}
+        params={"payment_id": payment_id, "refresh": 1}
     )
 
 
@@ -1084,8 +1084,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(promo_yes, pattern=r"^promo_yes$"))
     application.add_handler(CallbackQueryHandler(promo_no, pattern=r"^promo_no$"))
     application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_payment$"))
-    application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^show_events$"))
-    application.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check_group$"))
 
     logger.info("BOT SUCCESSFULLY STARTED - %s", time.strftime("%y/%m/%d (%H:%M:%S)"))
     application.run_polling()

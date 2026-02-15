@@ -9,7 +9,7 @@ def map_mono_to_local(status_mono: str) -> str:
     st = (status_mono or "").lower().strip()
 
     # success
-    if st == "success":
+    if st in {"success", "paid"}:
         return "success"
 
     # definitely failed / terminal
