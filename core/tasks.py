@@ -4,6 +4,7 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 from core.google_sheet import send_registration_to_google_sheets
+from models import Payment
 
 from telegram import Bot
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
@@ -79,11 +80,45 @@ def outbox_tick(self, limit: int = 200):
     logger.info("outbox_tick finished | sent=%s failed=%s", sent, failed)
     return {"total": len(msgs), "sent": sent, "failed": failed}
 
-save_to_sheets_task.delay({
-    "tg_id": '123213',
-    "username": 'cl9bix',
-    "full_name": "Yuriy Scheffer",
-    "age": 21,
-    "phone": "+380956103761",
-    "email": "cl9bix.dev@gmail.com",
-})
+@shared_task
+def sync_paid_users_to_sheets():
+    payments = (
+        Payment.objects
+        .select_related("user", "event")
+        .filter(status="success", exported_to_sheets=False)
+    )
+
+    logger.info("Sheets sync started | pending=%s", payments.count())
+
+    for payment in payments:
+        user = payment.user
+        if not user:
+            continue
+
+        try:
+            send_registration_to_google_sheets({
+                "tg_id": user.tg_id,
+                "username": user.username,
+                "full_name": user.full_name,
+                "age": user.age,
+                "phone": user.phone,
+                "email": user.email,
+                "event": payment.event.title,
+                "amount": str(payment.amount),
+            })
+
+            payment.exported_to_sheets = True
+            payment.save(update_fields=["exported_to_sheets"])
+
+            logger.info(
+                "Sheets sync success | payment_id=%s | tg_id=%s",
+                payment.id,
+                user.tg_id
+            )
+
+        except Exception as e:
+            logger.exception(
+                "Sheets sync failed | payment_id=%s | error=%s",
+                payment.id,
+                e
+            )

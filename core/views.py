@@ -268,7 +268,7 @@ def payment_create(request):
                 user.save(update_fields=["has_paid_once"])
 
             from .ticket import generate_ticket
-            ticket = generate_ticket(full_name=payment.user.full_name,
+            generate_ticket(full_name=payment.user.full_name,
                                      date_text=payment.event.start_at.strftime("%d.%m / %H:%M"))
             """
             full_name: "Ніна Мацюк"
