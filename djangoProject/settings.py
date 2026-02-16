@@ -112,12 +112,21 @@ TEMPLATES = [
 WSGI_APPLICATION = 'djangoProject.wsgi.application'
 
 
+from celery.schedules import crontab
+
 CELERY_BEAT_SCHEDULE = {
-    "outbox-tick-15s": {
+    "outbox-tick-1m": {
         "task": "core.tasks.outbox_tick",
-        "schedule": 15.0,
-    }
+        "schedule": crontab(minute="*/1"),
+        "args": (200,),
+    },
+    "sync-paid-users-to-sheets-1m": {
+        "task": "core.tasks.sync_paid_users_to_sheets",
+        "schedule": crontab(minute="*/1"),
+        "args": (200,),
+    },
 }
+
 
 
 # Database

@@ -7,9 +7,13 @@ from core.google_sheet import send_registration_to_google_sheets
 from .models import Payment
 from telegram import Bot
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
-
+from django.db import transaction
 from core.models import TgOutboxMessage
+from typing import Any, Dict, List
 
+from django.db import transaction
+
+from core.models import Payment, TgUser
 logger = logging.getLogger(__name__)
 
 
@@ -79,45 +83,66 @@ def outbox_tick(self, limit: int = 200):
     logger.info("outbox_tick finished | sent=%s failed=%s", sent, failed)
     return {"total": len(msgs), "sent": sent, "failed": failed}
 
-@shared_task
-def sync_paid_users_to_sheets():
-    payments = (
+SHEETS_FLAG_KEY = "synced_to_sheets_at"
+
+
+@shared_task(bind=True, name="core.tasks.sync_paid_users_to_sheets", max_retries=3, default_retry_delay=20)
+def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
+    """
+    Раз на хвилину:
+    - бере Payment зі status=success
+    - які ще НЕ синхронізовані (extra[SHEETS_FLAG_KEY] відсутній)
+    - додає юзера в Google Sheets
+    - ставить мітку в payment.extra, щоб не дублювати
+    """
+    qs = (
         Payment.objects
         .select_related("user", "event")
-        .filter(status="success", exported_to_sheets=False)
+        .filter(status="success", user__isnull=False)
+        .exclude(extra__has_key=SHEETS_FLAG_KEY)  # працює в Postgres
+        .order_by("id")[:limit]
     )
 
-    logger.info("Sheets sync started | pending=%s", payments.count())
+    payments: List[Payment] = list(qs)
+    total = len(payments)
 
-    for payment in payments:
-        user = payment.user
-        if not user:
-            continue
+    if total == 0:
+        logger.info("sync_paid_users_to_sheets: nothing to sync")
+        return {"ok": True, "total": 0, "synced": 0, "failed": 0}
+
+    synced = 0
+    failed = 0
+
+    for p in payments:
+        u: TgUser = p.user
+
+        data = {
+            "tg_id": u.tg_id,
+            "username": u.username or "",
+            "full_name": u.full_name,
+            "age": u.age or "",
+            "phone": u.phone,
+            "email": u.email,
+            "event": getattr(p.event, "title", ""),
+            "payment_id": p.id,
+            "paid_at": p.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
         try:
-            send_registration_to_google_sheets({
-                "tg_id": user.tg_id,
-                "username": user.username,
-                "full_name": user.full_name,
-                "age": user.age,
-                "phone": user.phone,
-                "email": user.email,
-                "event": payment.event.title,
-                "amount": str(payment.amount),
-            })
+            send_registration_to_google_sheets(data)
 
-            payment.exported_to_sheets = True
-            payment.save(update_fields=["exported_to_sheets"])
+            with transaction.atomic():
+                extra = p.extra or {}
+                extra[SHEETS_FLAG_KEY] = timezone.now().isoformat()
+                p.extra = extra
+                p.save(update_fields=["extra", "updated_at"])
 
-            logger.info(
-                "Sheets sync success | payment_id=%s | tg_id=%s",
-                payment.id,
-                user.tg_id
-            )
+            synced += 1
+            logger.info("sync_paid_users_to_sheets: synced | payment_id=%s tg_id=%s", p.id, u.tg_id)
 
         except Exception as e:
-            logger.exception(
-                "Sheets sync failed | payment_id=%s | error=%s",
-                payment.id,
-                e
-            )
+            failed += 1
+            logger.exception("sync_paid_users_to_sheets: failed | payment_id=%s | %s", p.id, e)
+
+    logger.info("sync_paid_users_to_sheets: done | total=%s synced=%s failed=%s", total, synced, failed)
+    return {"ok": True, "total": total, "synced": synced, "failed": failed}
