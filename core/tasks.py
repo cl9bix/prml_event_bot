@@ -3,6 +3,7 @@ import requests
 from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
+from core.google_sheet import send_registration_to_google_sheets
 
 from telegram import Bot
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
@@ -10,6 +11,11 @@ from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, Time
 from core.models import TgOutboxMessage
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task
+def save_to_sheets_task(data):
+    send_registration_to_google_sheets(data)
 
 def send_telegram_message(token: str, chat_id: int, text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -72,3 +78,12 @@ def outbox_tick(self, limit: int = 200):
 
     logger.info("outbox_tick finished | sent=%s failed=%s", sent, failed)
     return {"total": len(msgs), "sent": sent, "failed": failed}
+
+save_to_sheets_task.delay({
+    "tg_id": '123213',
+    "username": 'cl9bix',
+    "full_name": "Yuriy Scheffer",
+    "age": 21,
+    "phone": "+380956103761",
+    "email": "cl9bix.dev@gmail.com",
+})
