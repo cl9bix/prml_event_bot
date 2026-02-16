@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
 
-from core.google_sheets import send_registration_to_google_sheets
+from core.google_sheet import send_registration_to_google_sheets
 from core.models import TgOutboxMessage, Payment, TgUser
 
 logger = logging.getLogger(__name__)
