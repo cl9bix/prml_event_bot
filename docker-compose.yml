@@ -8,27 +8,30 @@ services:
       sh -c "
       python manage.py migrate &&
       python manage.py collectstatic --noinput &&
-      gunicorn djangoProject.wsgi:application --bind 0.0.0.0:8200 --workers 3
+      gunicorn djangoProject.wsgi:application --bind 0.0.0.0:8200 --workers 3 --timeout 60
       "
     volumes:
       - media_volume:/app/media
       - static_volume:/app/staticfiles
-      - ./creds:/app/creds:ro
     ports:
       - "8200:8200"
     env_file:
       - .env
     depends_on:
-      - redis
+      redis:
+        condition: service_started
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8200/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
   bot:
     build:
       context: ./bot
       dockerfile: Dockerfile
     container_name: prml_event_bot
-    depends_on:
-      - backend
     env_file:
       - .env
     environment:
@@ -36,6 +39,9 @@ services:
       API_BASE_URL: http://backend:8200
     volumes:
       - media_volume:/app/media
+    depends_on:
+      backend:
+        condition: service_healthy
     restart: unless-stopped
 
   redis:
@@ -52,12 +58,13 @@ services:
     volumes:
       - media_volume:/app/media
       - static_volume:/app/staticfiles
-      - ./creds:/app/creds:ro
     env_file:
       - .env
     depends_on:
-      - redis
-      - backend
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   celery_beat:
@@ -65,25 +72,19 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: prml_celery_beat
-    # якщо ти реально використовуєш django-celery-beat — ок.
-    # якщо НЕ використовуєш, скажи — я спрощу на звичайний beat
     command: celery -A djangoProject beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
       - media_volume:/app/media
       - static_volume:/app/staticfiles
-      - ./creds:/app/creds:ro
-      - celerybeat_data:/app/celerybeat
     env_file:
       - .env
-    environment:
-      # щоб celerybeat schedule НЕ створював файли в корені
-      CELERYBEAT_SCHEDULE_FILENAME: /app/celerybeat/celerybeat-schedule
     depends_on:
-      - redis
-      - backend
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
 volumes:
   media_volume:
   static_volume:
-  celerybeat_data:
