@@ -44,6 +44,7 @@ API_CONFIRM_MONO = f"{DJANGO_BASE_URL}/api/payments/confirm_monobank/"
 API_PAYMENTS_CONFIG = f'{DJANGO_BASE_URL}/api/payments/config/'
 API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/payments/history/'
 API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/email-confirmation/send/'
+API_ADD_GOOGLE_SHEETS = f'{DJANGO_BASE_URL}/api/google-sheets/add/'
 
 # Monobank
 MONO_TOKEN = os.getenv("MONO_TOKEN", "")
@@ -140,6 +141,9 @@ def check_payment_monobank(payment_id: int) -> Dict[str, Any]:
 
 
 def send_email_confirmation() -> Dict[str, Any]:
+    return api_get_json("POST", API_PAYMENTS_HISTORY,)
+
+def add_user_to_google_sheets(tg_id: int) -> Dict[str, Any]:
     return api_get_json("POST", API_PAYMENTS_HISTORY,)
 
 

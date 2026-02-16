@@ -32,6 +32,8 @@ from .ticket import generate_ticket
 from .services.payment_handlers import refresh_payment_from_mono
 
 logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class MonoWebhookStatus:
     SUCCESS: tuple[str, ...] = ("success",)
@@ -54,7 +56,6 @@ def tg_check_user(request):
 
     tg_id = data["tg_id"]
     user = TgUser.objects.filter(tg_id=tg_id).first()
-
 
     if not user:
         return Response({"ok": True, "exists": False, "user": None})
@@ -181,8 +182,9 @@ def promo_check(request):
     })
 
 
-
 from django.db import transaction
+
+
 @api_view(["POST"])
 def payment_create(request):
     s = PaymentCreateSerializer(data=request.data)
@@ -240,7 +242,7 @@ def payment_create(request):
         payment = Payment.objects.create(
             user=user,
             event=event,
-            amount=final_amount,                 # 0.00
+            amount=final_amount,  # 0.00
             status="success" if is_free else "pending",
             provider="promo" if is_free else "monobank",
             provider_payment_id=None,
@@ -265,16 +267,13 @@ def payment_create(request):
                 user.has_paid_once = True
                 user.save(update_fields=["has_paid_once"])
 
-
-
             from .ticket import generate_ticket
-            ticket = generate_ticket(full_name=payment.user.full_name,date_text=payment.event.start_at.strftime("%d.%m / %H:%M"))
+            ticket = generate_ticket(full_name=payment.user.full_name,
+                                     date_text=payment.event.start_at.strftime("%d.%m / %H:%M"))
             """
             full_name: "Ніна Мацюк"
             date_text: "21.03 / 9:30" (або будь-який формат, який хочеш показати)
             """
-
-
 
             return Response(
                 {
@@ -317,6 +316,7 @@ def payment_create(request):
         },
         status=status.HTTP_201_CREATED,
     )
+
 
 @api_view(["GET"])
 def payment_check(request):
@@ -371,11 +371,22 @@ def payment_check(request):
 
     else:
         logger.info("ℹ️ Refresh conditions not met")
+    from core.tasks import save_to_sheets_task
+
+    save_to_sheets_task.delay({
+        "tg_id": payment.user.tg_id,
+        "username": payment.user.username,
+        "full_name": payment.user.full_name,
+        "age": payment.user.age,
+        "phone": payment.user.phone,
+        "email": payment.user.email,
+    })
 
     return Response({
         "ok": True,
         "payment": PaymentSerializer(payment, context={"request": request}).data
     })
+
 
 @api_view(["GET"])
 def ticket_get(request):
@@ -510,11 +521,14 @@ def trigger_event_messages(request):
 
     return Response({"ok": True})
 
+
 import os
 import tempfile
 import logging
 import requests
 from core.service_email import send_ticket_email
+
+
 @api_view(["POST"])
 def send_email_confirmation(request):
     payment_id = request.data.get("payment_id")
@@ -608,3 +622,34 @@ def send_email_confirmation(request):
     except Exception as e:
         logger.exception("send_email_confirmation error | %s", e)
         return Response({"ok": False, "error": "server error"}, status=500)
+
+
+@api_view(["POST"])
+def send_paid_user_to_google_sheet(request):
+    user_tg_id = request.data.get("tg_id")
+    user_tg_id = '437304984'
+
+    if not user_tg_id:
+        return Response(
+            {"ok": False, "error": "user_tg_id is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = get_object_or_404(TgUser, tg_id=user_tg_id)
+    if not user:
+        return Response(
+            {"ok": False, "error": "user not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    from core.tasks import save_to_sheets_task
+    logger.info("send_paid_user_to_google_sheet | user_tg=%s | user_data={%s}", user_tg_id, user)
+
+    try:
+        resp = save_to_sheets_task(user)
+        if resp['status'] != 'success':
+            return Response(
+                {"ok": False, "error": "error while saving data to Google Sheets"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+    except Exception as e:
+        logger.exception("send_paid_user_to_google_sheet | error=%s", e)
