@@ -1,25 +1,21 @@
 import logging
+from typing import Any, Dict, List
+
 import requests
 from celery import shared_task
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
-from core.google_sheet import send_registration_to_google_sheets
-from .models import Payment
-from telegram import Bot
+
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
-from django.db import transaction
-from core.models import TgOutboxMessage
-from typing import Any, Dict, List
 
-from django.db import transaction
+from core.google_sheets import send_registration_to_google_sheets
+from core.models import TgOutboxMessage, Payment, TgUser
 
-from core.models import Payment, TgUser
 logger = logging.getLogger(__name__)
 
+SHEETS_FLAG_KEY = "synced_to_sheets_at"
 
-@shared_task
-def save_to_sheets_task(data):
-    send_registration_to_google_sheets(data)
 
 def send_telegram_message(token: str, chat_id: int, text: str) -> None:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -29,11 +25,17 @@ def send_telegram_message(token: str, chat_id: int, text: str) -> None:
     if not data.get("ok"):
         raise RuntimeError(str(data))
 
-@shared_task(bind=True, name="core.tasks.outbox_tick", max_retries=5, default_retry_delay=10)
-def outbox_tick(self, limit: int = 200):
-    token = settings.TELEGRAM_BOT_TOKEN
-    bot = Bot(token=token)
 
+@shared_task
+def save_to_sheets_task(data: Dict[str, Any]) -> None:
+    """
+    Якщо хочеш ручний пуш 1 юзера в Sheets.
+    """
+    send_registration_to_google_sheets(data)
+
+
+@shared_task(bind=True, name="core.tasks.outbox_tick", max_retries=5, default_retry_delay=10)
+def outbox_tick(self, limit: int = 200) -> Dict[str, int]:
     now = timezone.now()
     msgs = list(
         TgOutboxMessage.objects
@@ -43,16 +45,22 @@ def outbox_tick(self, limit: int = 200):
 
     logger.info("outbox_tick started | pending=%s", len(msgs))
 
-    sent = failed = 0
+    sent = 0
+    failed = 0
+
     for m in msgs:
         try:
-            token = settings.TELEGRAM_BOT_TOKEN
-            send_telegram_message(token=token,chat_id=m.tg_id, text=m.text)
+            send_telegram_message(
+                token=settings.TELEGRAM_BOT_TOKEN,
+                chat_id=m.tg_id,
+                text=m.text
+            )
 
             m.status = TgOutboxMessage.Status.SENT
             m.sent_at = timezone.now()
             m.error = ""
             m.save(update_fields=["status", "sent_at", "error"])
+
             sent += 1
 
         except RetryAfter as e:
@@ -78,12 +86,10 @@ def outbox_tick(self, limit: int = 200):
             m.status = TgOutboxMessage.Status.FAILED
             m.error = str(e)
             m.save(update_fields=["status", "error"])
-            logger.exception("Unexpected error | outbox_id=%s", m.id)
+            logger.exception("Unexpected error | outbox_id=%s | %s", m.id, e)
 
     logger.info("outbox_tick finished | sent=%s failed=%s", sent, failed)
     return {"total": len(msgs), "sent": sent, "failed": failed}
-
-SHEETS_FLAG_KEY = "synced_to_sheets_at"
 
 
 @shared_task(bind=True, name="core.tasks.sync_paid_users_to_sheets", max_retries=3, default_retry_delay=20)
@@ -91,15 +97,17 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
     """
     Раз на хвилину:
     - бере Payment зі status=success
-    - які ще НЕ синхронізовані (extra[SHEETS_FLAG_KEY] відсутній)
+    - user != null
+    - які ще НЕ синхронізовані (extra[SHEETS_FLAG_KEY] відсутній або порожній)
     - додає юзера в Google Sheets
     - ставить мітку в payment.extra, щоб не дублювати
+
+    ✅ Працює на SQLite/MySQL/Postgres (без has_key).
     """
     qs = (
         Payment.objects
         .select_related("user", "event")
         .filter(status="success", user__isnull=False)
-        .exclude(extra__has_key=SHEETS_FLAG_KEY)  # працює в Postgres
         .order_by("id")[:limit]
     )
 
@@ -114,9 +122,13 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
     failed = 0
 
     for p in payments:
+        extra = p.extra or {}
+        if extra.get(SHEETS_FLAG_KEY):
+            continue  # вже синкнули
+
         u: TgUser = p.user
 
-        data = {
+        payload = {
             "tg_id": u.tg_id,
             "username": u.username or "",
             "full_name": u.full_name,
@@ -125,11 +137,11 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
             "email": u.email,
             "event": getattr(p.event, "title", ""),
             "payment_id": p.id,
-            "paid_at": p.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "paid_at": (p.updated_at or timezone.now()).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         try:
-            send_registration_to_google_sheets(data)
+            send_registration_to_google_sheets(payload)
 
             with transaction.atomic():
                 extra = p.extra or {}
