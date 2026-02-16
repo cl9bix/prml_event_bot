@@ -4,8 +4,7 @@ from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 from core.google_sheet import send_registration_to_google_sheets
-from models import Payment
-
+from .models import Payment
 from telegram import Bot
 from telegram.error import RetryAfter, Forbidden, BadRequest, NetworkError, TimedOut
 
