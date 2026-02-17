@@ -92,6 +92,18 @@ def outbox_tick(self, limit: int = 200) -> Dict[str, int]:
     return {"total": len(msgs), "sent": sent, "failed": failed}
 
 
+from typing import Any, Dict, List
+from celery import shared_task
+from django.utils import timezone
+from django.db import transaction
+import logging
+
+from core.models import Payment, TgUser
+from core.google_sheet import send_registration_to_google_sheets
+
+logger = logging.getLogger(__name__)
+
+
 @shared_task(
     bind=True,
     name="core.tasks.sync_paid_users_to_sheets",
@@ -104,23 +116,38 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
     - бере Payment зі status=success
     - user != null
     - exported_to_sheets=False
+    - ТІЛЬКИ реальна оплата (monobank + amount > 0)  ✅
     - додає юзера в Google Sheets
     - ставить exported_to_sheets=True
     """
 
-    payments = list(
+    # Якщо ти хочеш тільки "реальні" платежі:
+    base_qs = (
         Payment.objects
         .select_related("user", "event")
         .filter(
             status="success",
             user__isnull=False,
             exported_to_sheets=False,
+
+            provider="monobank",   # ✅ прибирає promo / тестові провайдери
+            amount__gt=0,          # ✅ прибирає 100% промо з amount=0
         )
-        .order_by("id")[:limit]
+        # .filter(event__is_active=True)  # ✅ якщо треба тільки активні івенти
+        .order_by("id")
     )
 
-    total = len(payments)
+    # Якщо Postgres — краще так (без дубля при паралельних воркерах):
+    try:
+        with transaction.atomic():
+            payments: List[Payment] = list(
+                base_qs.select_for_update(skip_locked=True)[:limit]
+            )
+    except Exception:
+        # fallback для SQLite/MySQL без skip_locked
+        payments = list(base_qs[:limit])
 
+    total = len(payments)
     if total == 0:
         logger.info("sync_paid_users_to_sheets: nothing to sync")
         return {"ok": True, "total": 0, "synced": 0, "failed": 0}
@@ -152,23 +179,19 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
             synced += 1
             logger.info(
                 "sync_paid_users_to_sheets: synced | payment_id=%s tg_id=%s",
-                p.id,
-                u.tg_id
+                p.id, u.tg_id
             )
 
         except Exception as e:
             failed += 1
             logger.exception(
                 "sync_paid_users_to_sheets: failed | payment_id=%s | %s",
-                p.id,
-                e
+                p.id, e
             )
 
     logger.info(
         "sync_paid_users_to_sheets: done | total=%s synced=%s failed=%s",
-        total,
-        synced,
-        failed
+        total, synced, failed
     )
 
     return {"ok": True, "total": total, "synced": synced, "failed": failed}
