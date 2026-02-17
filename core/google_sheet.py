@@ -51,8 +51,10 @@ def send_registration_to_google_sheets(data: Dict[str, Any]) -> None:
       "age": ...,
       "phone": ...,
       "email": ...
+       "event": getattr(p.event, "title", ""),
+       "payment_id": p.id,
+        "paid_at": (p.updated_at or timezone.now()).strftime("%Y-%m-%d %H:%M:%S"),
     }
-
     Також можна передати додаткові поля:
     event, payment_id, paid_at
     """

@@ -31,7 +31,6 @@ urlpatterns = [
     path("messages/trigger/", views.trigger_event_messages, name="trigger_event_messages"),
 
     path("api/send-email-confirmation/",views.send_email_confirmation,name="email_confirmation"),
-    path('api/google-sheets/add/',views.send_paid_user_to_google_sheet,name='send_paid_user_google_sheet')
 ]
 
 
