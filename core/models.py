@@ -149,7 +149,7 @@ class Payment(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    exported_to_sheets = models.BooleanField(default=False, db_index=True)
     def __str__(self):
         return f"Payment #{self.id} ({self.status})"
 
