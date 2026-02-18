@@ -29,11 +29,6 @@ services:
       redis:
         condition: service_started
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/api/events/', timeout=5).read(); print('ok')\" || exit 1"]
-      interval: 15s
-      timeout: 7s
-      retries: 10
 
   bot:
     build:
