@@ -421,38 +421,72 @@ def payment_check(request):
     })
 
 
+
 @api_view(["GET"])
 def ticket_get(request):
     payment_id = request.query_params.get("payment_id")
     if not payment_id:
         return Response({"ok": False, "error": "payment_id required"}, status=400)
-    payment = get_object_or_404(Payment.objects.select_related("event", "user"), id=payment_id)
+
+    payment = get_object_or_404(
+        Payment.objects.select_related("event", "user"),
+        id=payment_id
+    )
+
     if payment.status != "success":
         return Response({"ok": False, "error": "Payment is not successful"}, status=400)
+
+    # 1) Якщо квиток уже є і зображення існує — віддаємо одразу (ідемпотентність)
     ticket = Ticket.objects.filter(payment=payment).first()
     if ticket and ticket.image:
         return Response({"ok": True, "ticket": TicketSerializer(ticket, context={"request": request}).data})
+
+    # 2) Створюємо/оновлюємо Ticket атомарно + гарантуємо token
     try:
-        date_text = payment.event.start_at.strftime('%d.%m / %H:%M')
-        ticket, _ = Ticket.objects.get_or_create(
-            user=payment.user,
-            event=payment.event,
-            defaults={"payment": payment},
-        )
+        date_text = payment.event.start_at.strftime("%d.%m / %H:%M") if payment.event.start_at else ""
+
+        # Спробуємо кілька разів на випадок колізії токена (дуже малоймовірно, але safe)
+        for _ in range(3):
+            try:
+                with transaction.atomic():
+                    ticket = Ticket.objects.select_for_update().filter(payment=payment).first()
+
+                    if not ticket:
+                        # ✅ Створюємо квиток строго під цей payment (бо OneToOne)
+                        ticket = Ticket.objects.create(
+                            user=payment.user,
+                            event=payment.event,
+                            payment=payment,
+                            token=uuid.uuid4().hex,
+                        )
+                    else:
+                        # ✅ Якщо квиток існує, але token порожній — виправляємо
+                        if not ticket.token:
+                            ticket.token = uuid.uuid4().hex
+                            ticket.save(update_fields=["token"])
+
+                break
+            except IntegrityError:
+                # якщо раптом згенерився токен, який вже існує
+                continue
+        else:
+            return Response(
+                {"ok": False, "error": "ticket_generate_failed: IntegrityError: token collision"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         filename = generate_ticket(full_name=payment.user.full_name, date_text=date_text)
-
         ticket.image = f"tickets/{filename}"
         ticket.save(update_fields=["image"])
 
     except Exception as e:
+        logger.exception("ticket_get failed | payment_id=%s | %s", payment_id, e)
         return Response(
             {"ok": False, "error": f"ticket_generate_failed: {type(e).__name__}: {e}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     return Response({"ok": True, "ticket": TicketSerializer(ticket, context={"request": request}).data})
-
 
 @api_view(["GET"])
 def tickets_my(request):
