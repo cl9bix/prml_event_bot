@@ -77,6 +77,10 @@ services:
       - redis
     restart: unless-stopped
 
+  volumes:
+    media_volume:
+    static_volume:
+
 
 
 
