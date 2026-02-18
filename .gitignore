@@ -2,3 +2,4 @@
 .env
 venv/
 celerybeat-schedule*
+creds*
