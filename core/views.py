@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
-from typing import Any
 from decimal import Decimal, ROUND_HALF_UP
-
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-
+from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from rest_framework import status
+from typing import Any
 
+from .google_sheet import send_registration_to_google_sheets
 from .models import TgUser, Event, Payment, Ticket, EventMessageTemplate, TgOutboxMessage, PromoCode
+from .monobank import mono_create_invoice, verify_mono_webhook_signature
 from .serializers import (
     TgUserSerializer,
     TgUserCreateSerializer,
@@ -26,10 +28,8 @@ from .serializers import (
     PaymentSerializer,
     TicketSerializer,
 )
-from .google_sheet import send_registration_to_google_sheets
-from .monobank import mono_create_invoice, verify_mono_webhook_signature
-from .ticket import generate_ticket
 from .services.payment_handlers import refresh_payment_from_mono
+from .ticket import generate_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -422,22 +422,8 @@ def payment_check(request):
 
 
 
-from __future__ import annotations
 
-import logging
-import uuid
 
-from django.db import IntegrityError, transaction
-from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-
-from .models import Payment, Ticket
-from .serializers import TicketSerializer
-from .ticket import generate_ticket
-
-logger = logging.getLogger(__name__)
 
 
 @api_view(["GET"])
