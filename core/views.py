@@ -422,6 +422,24 @@ def payment_check(request):
 
 
 
+from __future__ import annotations
+
+import logging
+import uuid
+
+from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import Payment, Ticket
+from .serializers import TicketSerializer
+from .ticket import generate_ticket
+
+logger = logging.getLogger(__name__)
+
+
 @api_view(["GET"])
 def ticket_get(request):
     payment_id = request.query_params.get("payment_id")
@@ -475,6 +493,7 @@ def ticket_get(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        # 3) Генерація зображення + збереження
         filename = generate_ticket(full_name=payment.user.full_name, date_text=date_text)
         ticket.image = f"tickets/{filename}"
         ticket.save(update_fields=["image"])
