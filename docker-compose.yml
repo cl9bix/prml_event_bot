@@ -1,35 +1,54 @@
+version: "3.9"
+
 services:
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: prml_backend
-    command: python manage.py runserver 0.0.0.0:8200
-    volumes:
-      - .:/app
-      - media_volume:/app/media
-      - static_volume:/app/staticfiles
+    command: >
+      sh -lc "
+      python manage.py migrate &&
+      python manage.py collectstatic --noinput &&
+      gunicorn djangoProject.wsgi:application
+        --bind 0.0.0.0:8200
+        --workers 3
+        --timeout 60
+      "
     ports:
       - "8200:8200"
     env_file:
       - .env
+    environment:
+      DJANGO_BASE_URL: http://backend:8200
+    volumes:
+      - ./creds:/app/creds:ro
+      - media_volume:/app/media
+      - static_volume:/app/staticfiles
     depends_on:
-      - redis
+      redis:
+        condition: service_started
     restart: unless-stopped
-
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/api/events/', timeout=5).read(); print('ok')\" || exit 1"]
+      interval: 15s
+      timeout: 7s
+      retries: 10
 
   bot:
     build:
       context: ./bot
       dockerfile: Dockerfile
     container_name: prml_event_bot
-    depends_on:
-      - backend
     env_file:
       - .env
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
+      DJANGO_BASE_URL: http://backend:8200
       API_BASE_URL: http://backend:8200
+    depends_on:
+      backend:
+        condition: service_healthy
     volumes:
       - media_volume:/app/media
     restart: unless-stopped
@@ -40,22 +59,29 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   celery_worker:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: prml_celery_worker
-    command: celery -A djangoProject worker -l info
-    volumes:
-      - .:/app
-      - media_volume:/app/media
-      - static_volume:/app/staticfiles
+    command: celery -A djangoProject worker -l info --concurrency=4
     env_file:
       - .env
+    volumes:
+      - ./creds:/app/creds:ro
+      - media_volume:/app/media
+      - static_volume:/app/staticfiles
     depends_on:
-      - backend
-      - redis
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   celery_beat:
@@ -64,15 +90,17 @@ services:
       dockerfile: Dockerfile
     container_name: prml_celery_beat
     command: celery -A djangoProject beat -l info
-    volumes:
-      - .:/app
-      - media_volume:/app/media
-      - static_volume:/app/staticfiles
     env_file:
       - .env
+    volumes:
+      - ./creds:/app/creds:ro
+      - media_volume:/app/media
+      - static_volume:/app/staticfiles
     depends_on:
-      - backend
-      - redis
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
