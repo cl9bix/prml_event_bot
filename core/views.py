@@ -83,17 +83,17 @@ def tg_create_user(request):
         for f in ("username", "full_name", "age", "phone", "email"):
             setattr(user, f, data.get(f, getattr(user, f)))
         user.save()
-
-    _safe_send_to_sheets(
-        {
-            "tg_id": user.tg_id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "age": user.age,
-            "phone": user.phone,
-            "email": user.email,
-        }
-    )
+    #
+    # _safe_send_to_sheets(
+    #     {
+    #         "tg_id": user.tg_id,
+    #         "username": user.username,
+    #         "full_name": user.full_name,
+    #         "age": user.age,
+    #         "phone": user.phone,
+    #         "email": user.email,
+    #     }
+    # )
 
     return Response({"ok": True, "user": TgUserSerializer(user).data}, status=status.HTTP_201_CREATED)
 
