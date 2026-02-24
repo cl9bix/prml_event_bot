@@ -280,6 +280,7 @@ def _extract_user_id(message_or_query, fallback_update: Update | None = None) ->
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     context.user_data.clear()
+    context.user_data['promo_checked'] = False
 
     await typing(update, 0.7)
     await update.message.reply_text("Привіт! Це ПРМЛ бот, який допоможе тобі стати учасником наших подій⚡️")
@@ -535,14 +536,12 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.effective_message.reply_text("Івент загубився 😅 Почни /start")
         return ConversationHandler.END
 
-    # якщо ще не питали промо
-    if "promo_code" not in context.user_data:
+    if not context.user_data.get("promo_checked"):
         return await ask_promo(update, context)
 
     payload: Dict[str, Any] = {"event_id": event["id"]}
     price = event_price_uah(event)
 
-    # ✅ ТІЛЬКИ анкета (а не check_user response)
     reg_data = context.user_data.get("reg_data") or {}
 
     # ✅ backend_resp треба отримати ДО використання
@@ -577,10 +576,10 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             final_amount = promo_check.get("final_amount")
             payload["promo_code"] = promo_code
             payload["final_amount"] = final_amount
+    context.user_data["promo_checked"] = True
 
     await typing(update, 0.5)
 
-    # ✅ ОДИН виклик create_payment
     resp = create_payment(payload)
 
     if not resp.get("ok"):
@@ -655,6 +654,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     payment_id = int(payment.get("id"))
 
     if provider == "promo":
+        context.user_data["promo_checked"] = True
         await query.answer("Оплата не потрібна ✅ Видаю квиток… 🎫")
         return await gate_group_then_ticket(query, context)
 
