@@ -43,7 +43,7 @@ API_USER_TICKETS = f"{DJANGO_BASE_URL}/api/tickets/my/"
 API_CONFIRM_MONO = f"{DJANGO_BASE_URL}/api/payments/confirm_monobank/"
 API_PAYMENTS_CONFIG = f'{DJANGO_BASE_URL}/api/payments/config/'
 API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/payments/history/'
-API_PAYMENTS_HISTORY = f'{DJANGO_BASE_URL}/api/email-confirmation/send/'
+API_EMAIL_CONFIRMATION = f'{DJANGO_BASE_URL}/api/email-confirmation/send/'
 API_ADD_GOOGLE_SHEETS = f'{DJANGO_BASE_URL}/api/google-sheets/add/'
 
 # Monobank
@@ -140,12 +140,12 @@ def check_payment_monobank(payment_id: int) -> Dict[str, Any]:
     )
 
 
-def send_email_confirmation() -> Dict[str, Any]:
-    return api_get_json("POST", API_PAYMENTS_HISTORY,)
-
-def add_user_to_google_sheets(tg_id: int) -> Dict[str, Any]:
-    return api_get_json("POST", API_PAYMENTS_HISTORY,)
-
+def send_email_confirmation(payment_id: int, ticket_url: str) -> Dict[str, Any]:
+    return api_get_json(
+        "POST",
+        API_EMAIL_CONFIRMATION,
+        json={"payment_id": payment_id, "ticket_url": ticket_url},
+    )
 
 
 async def CustomMessageSender(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, kb: list = None,
@@ -530,7 +530,6 @@ async def reg_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     event = context.user_data.get("chosen_event")
     tg_user = update.effective_user
-    reg_data = context.user_data.get("reg_data") or check_user(update.effective_user) or None
 
     if not event:
         await update.effective_message.reply_text("Івент загубився 😅 Почни /start")
@@ -542,6 +541,24 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     payload: Dict[str, Any] = {"event_id": event["id"]}
     price = event_price_uah(event)
+
+    # ✅ ТІЛЬКИ анкета (а не check_user response)
+    reg_data = context.user_data.get("reg_data") or {}
+
+    # ✅ backend_resp треба отримати ДО використання
+    backend_resp = check_user(tg_user)
+
+    # ✅ user_id тільки якщо юзер реально існує в бекенді
+    if backend_resp.get("ok") and backend_resp.get("exists") and backend_resp.get("user"):
+        payload["user_id"] = backend_resp["user"]["id"]
+
+    # базові дані (можеш лишити, бек їх кладе в extra якщо user_id нема)
+    payload.update({
+        "tg_id": tg_user.id,
+        "username": tg_user.username,
+        "full_name": tg_user.full_name,
+        "reg_data": reg_data,
+    })
 
     promo_code = context.user_data.get("promo_code")  # рядок або None
     promo_check = None
@@ -561,20 +578,6 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
             payload["promo_code"] = promo_code
             payload["final_amount"] = final_amount
 
-    # 2) user data (backend user)
-    try:
-        backend_user = check_user(update.effective_user)
-        user_id = backend_user["user"]["id"]
-        payload.update({
-            "user_id": user_id,
-            "tg_id": tg_user.id,
-            "username": tg_user.username,
-            "full_name": tg_user.full_name,
-            "reg_data": reg_data,
-        })
-    except Exception as e:
-        logger.warning("ERROR by start_payment_flow=%s", e)
-
     await typing(update, 0.5)
 
     # ✅ ОДИН виклик create_payment
@@ -585,14 +588,11 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("promo_code", None)
         return ConversationHandler.END
 
-    # завжди зберігаємо payment
     payment = resp.get("payment", {})
     if payment:
         context.user_data["payment"] = payment
 
-    # =======================
-    # ✅ FREE CASE (100% promo)
-    # =======================
+    # ✅ FREE CASE
     if resp.get("is_free") is True or payment.get("provider") == "promo":
         msg = update.callback_query.message if update.callback_query else update.message
         await msg.reply_text(
@@ -602,11 +602,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return await gate_group_then_ticket(msg, context)
 
-    # =======================
-    # NORMAL PAYMENT FLOW
-    # =======================
-    provider = payment.get("provider", "unknown")
-
+    # NORMAL PAYMENT FLOW (далі твій код без змін)
     invoice = resp.get("invoice") or {}
     invoice_data = invoice.get("invoiceData") or {}
     payment_link = invoice_data.get("pageUrl")
@@ -632,7 +628,7 @@ async def start_payment_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Після оплати натисни «✅ Я оплатив(ла)» і твій індивідуальний квиток з’явиться нижче."
         "\n\n"
         "<b>З важливого:</b>\n\n"
-        "<i>  -  Відповідно до законодавства України та умов продажу квитків, вартість квитків не повертається. Якщо ви не можете відвідати захід, не пізніше ніж за 10 днів до його початку ви можете переоформити квиток через організатора на іншу особу. Для цього потрібно завчасно зв’язатись із організатором та надати дані нового учасника.</i>"
+        "<i>  -  Відповідно до законодавства України та умов продажу квитків, вартість квитків не повертається...</i>"
     )
 
     kb_rows = []

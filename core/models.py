@@ -149,19 +149,20 @@ class Payment(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    exported_to_sheets = models.BooleanField(default=False, db_index=True)
     def __str__(self):
         return f"Payment #{self.id} ({self.status})"
 
 
 # ================= TICKETS =================
 
+def gen_token():
+    return uuid.uuid4().hex
 class Ticket(models.Model):
     user = models.ForeignKey(TgUser, on_delete=models.CASCADE)
     event = models.ForeignKey(Event, on_delete=models.CASCADE)
     payment = models.OneToOneField(Payment, on_delete=models.CASCADE)
-
-    token = models.CharField(max_length=64, unique=True)
+    token = models.CharField(max_length=64, unique=True, default=gen_token, editable=False)
     image = models.ImageField(upload_to="tickets/")
     created_at = models.DateTimeField(auto_now_add=True)
 

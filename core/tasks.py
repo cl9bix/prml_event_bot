@@ -92,28 +92,62 @@ def outbox_tick(self, limit: int = 200) -> Dict[str, int]:
     return {"total": len(msgs), "sent": sent, "failed": failed}
 
 
-@shared_task(bind=True, name="core.tasks.sync_paid_users_to_sheets", max_retries=3, default_retry_delay=20)
+from typing import Any, Dict, List
+from celery import shared_task
+from django.utils import timezone
+from django.db import transaction
+import logging
+
+from core.models import Payment, TgUser
+from core.google_sheet import send_registration_to_google_sheets
+
+logger = logging.getLogger(__name__)
+
+
+@shared_task(
+    bind=True,
+    name="core.tasks.sync_paid_users_to_sheets",
+    max_retries=3,
+    default_retry_delay=20
+)
 def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
     """
     Раз на хвилину:
     - бере Payment зі status=success
     - user != null
-    - які ще НЕ синхронізовані (extra[SHEETS_FLAG_KEY] відсутній або порожній)
+    - exported_to_sheets=False
+    - ТІЛЬКИ реальна оплата (monobank + amount > 0)  ✅
     - додає юзера в Google Sheets
-    - ставить мітку в payment.extra, щоб не дублювати
-
-    ✅ Працює на SQLite/MySQL/Postgres (без has_key).
+    - ставить exported_to_sheets=True
     """
-    qs = (
+
+    # Якщо ти хочеш тільки "реальні" платежі:
+    base_qs = (
         Payment.objects
         .select_related("user", "event")
-        .filter(status="success", user__isnull=False)
-        .order_by("id")[:limit]
+        .filter(
+            status="success",
+            user__isnull=False,
+            exported_to_sheets=False,
+
+            provider="monobank",   # ✅ прибирає promo / тестові провайдери
+            amount__gt=0,          # ✅ прибирає 100% промо з amount=0
+        )
+        # .filter(event__is_active=True)  # ✅ якщо треба тільки активні івенти
+        .order_by("id")
     )
 
-    payments: List[Payment] = list(qs)
-    total = len(payments)
+    # Якщо Postgres — краще так (без дубля при паралельних воркерах):
+    try:
+        with transaction.atomic():
+            payments: List[Payment] = list(
+                base_qs.select_for_update(skip_locked=True)[:limit]
+            )
+    except Exception:
+        # fallback для SQLite/MySQL без skip_locked
+        payments = list(base_qs[:limit])
 
+    total = len(payments)
     if total == 0:
         logger.info("sync_paid_users_to_sheets: nothing to sync")
         return {"ok": True, "total": 0, "synced": 0, "failed": 0}
@@ -122,10 +156,6 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
     failed = 0
 
     for p in payments:
-        extra = p.extra or {}
-        if extra.get(SHEETS_FLAG_KEY):
-            continue  # вже синкнули
-
         u: TgUser = p.user
 
         payload = {
@@ -143,18 +173,25 @@ def sync_paid_users_to_sheets(self, limit: int = 200) -> Dict[str, Any]:
         try:
             send_registration_to_google_sheets(payload)
 
-            with transaction.atomic():
-                extra = p.extra or {}
-                extra[SHEETS_FLAG_KEY] = timezone.now().isoformat()
-                p.extra = extra
-                p.save(update_fields=["extra", "updated_at"])
+            p.exported_to_sheets = True
+            p.save(update_fields=["exported_to_sheets"])
 
             synced += 1
-            logger.info("sync_paid_users_to_sheets: synced | payment_id=%s tg_id=%s", p.id, u.tg_id)
+            logger.info(
+                "sync_paid_users_to_sheets: synced | payment_id=%s tg_id=%s",
+                p.id, u.tg_id
+            )
 
         except Exception as e:
             failed += 1
-            logger.exception("sync_paid_users_to_sheets: failed | payment_id=%s | %s", p.id, e)
+            logger.exception(
+                "sync_paid_users_to_sheets: failed | payment_id=%s | %s",
+                p.id, e
+            )
 
-    logger.info("sync_paid_users_to_sheets: done | total=%s synced=%s failed=%s", total, synced, failed)
+    logger.info(
+        "sync_paid_users_to_sheets: done | total=%s synced=%s failed=%s",
+        total, synced, failed
+    )
+
     return {"ok": True, "total": total, "synced": synced, "failed": failed}

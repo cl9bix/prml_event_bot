@@ -2,21 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
-from typing import Any
 from decimal import Decimal, ROUND_HALF_UP
-
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-
+from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from rest_framework import status
+from typing import Any
 
+from .google_sheet import send_registration_to_google_sheets
 from .models import TgUser, Event, Payment, Ticket, EventMessageTemplate, TgOutboxMessage, PromoCode
+from .monobank import mono_create_invoice, verify_mono_webhook_signature
 from .serializers import (
     TgUserSerializer,
     TgUserCreateSerializer,
@@ -26,10 +28,8 @@ from .serializers import (
     PaymentSerializer,
     TicketSerializer,
 )
-from .google_sheet import send_registration_to_google_sheets
-from .monobank import mono_create_invoice, verify_mono_webhook_signature
-from .ticket import generate_ticket
 from .services.payment_handlers import refresh_payment_from_mono
+from .ticket import generate_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -83,17 +83,17 @@ def tg_create_user(request):
         for f in ("username", "full_name", "age", "phone", "email"):
             setattr(user, f, data.get(f, getattr(user, f)))
         user.save()
-
-    _safe_send_to_sheets(
-        {
-            "tg_id": user.tg_id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "age": user.age,
-            "phone": user.phone,
-            "email": user.email,
-        }
-    )
+    #
+    # _safe_send_to_sheets(
+    #     {
+    #         "tg_id": user.tg_id,
+    #         "username": user.username,
+    #         "full_name": user.full_name,
+    #         "age": user.age,
+    #         "phone": user.phone,
+    #         "email": user.email,
+    #     }
+    # )
 
     return Response({"ok": True, "user": TgUserSerializer(user).data}, status=status.HTTP_201_CREATED)
 
@@ -193,56 +193,88 @@ def payment_create(request):
 
     event = get_object_or_404(Event, id=data["event_id"], is_active=True)
 
+    # -----------------------------
+    # 1) Завжди отримуємо/створюємо user
+    # -----------------------------
     user = None
     extra: dict[str, Any] = {}
 
-    # 1) user або extra
     if data.get("user_id"):
         user = get_object_or_404(TgUser, id=data["user_id"])
     else:
+        # fallback: якщо бот не передав user_id — спробуємо зібрати дані з reg_data
+        reg_data = data.get("reg_data") or {}
+        tg_id = data.get("tg_id") or reg_data.get("tg_id")
+        if not tg_id:
+            return Response({"ok": False, "error": "user_id або tg_id required"}, status=400)
+
         extra = {
-            "tg_id": data.get("tg_id"),
-            "username": data.get("username"),
-            "full_name": data.get("full_name"),
-            "reg_data": data.get("reg_data", {}),
+            "tg_id": tg_id,
+            "username": data.get("username") or reg_data.get("username"),
+            "full_name": data.get("full_name") or reg_data.get("full_name"),
+            "reg_data": reg_data,
         }
 
+        # створимо/оновимо TgUser, щоб потім можна було створити Ticket (в Ticket.user не null)
+        full_name = (reg_data.get("full_name") or data.get("full_name") or "").strip()
+        phone = (reg_data.get("phone") or "").strip()
+        email = (reg_data.get("email") or "").strip()
+
+        if not full_name or not phone or not email:
+            return Response(
+                {"ok": False, "error": "reg_data must contain full_name/phone/email when user_id is missing"},
+                status=400,
+            )
+
+        user, _ = TgUser.objects.get_or_create(
+            tg_id=tg_id,
+            defaults={
+                "username": extra.get("username"),
+                "full_name": full_name,
+                "age": reg_data.get("age"),
+                "phone": phone,
+                "email": email,
+            },
+        )
+
+    # -----------------------------
+    # 2) Promo / amount / is_free
+    # -----------------------------
     promo_code_raw = (data.get("promo_code") or "").strip()
     promo = None
     discount_percent = 0
+
     original_amount = Decimal(str(event.price))
+    # якщо final_amount не передали — беремо event.price
     final_amount = Decimal(str(data.get("final_amount") or event.price))
 
-    # 2) якщо промо передали — валідуємо і нормалізуємо amount
     if promo_code_raw:
         promo = PromoCode.objects.filter(
             code__iexact=promo_code_raw,
             is_available=True,
-            valid_until__gte=timezone.now()
+            valid_until__gte=timezone.now(),
         ).first()
-
         if not promo:
             return Response({"ok": False, "error": "Promo invalid"}, status=404)
 
         discount_percent = int(promo.percentage or 0)
 
-        # якщо фронт прислав final_amount — ок, але ми все одно зафіксуємо is_free по проценту/сумі
-        # (захист від підміни: якщо у промо 100 — точно free)
         if discount_percent >= 100:
             final_amount = Decimal("0.00")
         else:
-            # на всяк: якщо прислали final_amount, але він <0 -> 0
             if final_amount < Decimal("0.00"):
                 final_amount = Decimal("0.00")
 
-    # 3) FREE кейс: final_amount == 0.00 -> не робимо інвойс, одразу success + квиток
     is_free = (final_amount == Decimal("0.00"))
 
+    # -----------------------------
+    # 3) Створюємо Payment + FREE flow
+    # -----------------------------
     with transaction.atomic():
         payment = Payment.objects.create(
             user=user,
             event=event,
-            amount=final_amount,  # 0.00
+            amount=final_amount,
             status="success" if is_free else "pending",
             provider="promo" if is_free else "monobank",
             provider_payment_id=None,
@@ -257,23 +289,33 @@ def payment_create(request):
             },
         )
 
-        # якщо free — одразу “оплата успішна”, лічильники, квиток
         if is_free:
+            # промо використовуємо атомарно
             if promo:
-                promo.uses_count = promo.uses_count + 1
-                promo.save(update_fields=["uses_count"])
+                PromoCode.objects.filter(id=promo.id).update(uses_count=F("uses_count") + 1)
 
-            if user:
-                user.has_paid_once = True
-                user.save(update_fields=["has_paid_once"])
+            # юзеру позначка (якщо треба)
+            TgUser.objects.filter(id=user.id).update(has_paid_once=True)
 
-            from .ticket import generate_ticket
-            generate_ticket(full_name=payment.user.full_name,
-                                     date_text=payment.event.start_at.strftime("%d.%m / %H:%M"))
-            """
-            full_name: "Ніна Мацюк"
-            date_text: "21.03 / 9:30" (або будь-який формат, який хочеш показати)
-            """
+            # ✅ генеруємо квиток і зберігаємо в Ticket.image
+            date_text = event.start_at.strftime("%d.%m / %H:%M") if event.start_at else ""
+            filename = generate_ticket(full_name=user.full_name, date_text=date_text)
+
+            ticket, _ = Ticket.objects.get_or_create(
+                payment=payment,
+                defaults={
+                    "user": user,
+                    "event": event,
+                    "token": payment.extra.get("token") or "",  # якщо токен генеруєш окремо — підстав
+                },
+            )
+            # якщо token обов'язковий — краще генерувати тут нормально (uuid/sha)
+            if not ticket.token:
+                import uuid
+                ticket.token = uuid.uuid4().hex
+
+            ticket.image = f"tickets/{filename}"
+            ticket.save(update_fields=["token", "image"])
 
             return Response(
                 {
@@ -285,8 +327,10 @@ def payment_create(request):
                 status=status.HTTP_201_CREATED,
             )
 
-    # 4) Звичайний кейс: генеруємо інвойс
-    tg_id = user.tg_id if user else (extra or {}).get("tg_id")
+    # -----------------------------
+    # 4) Звичайний кейс: інвойс Monobank
+    # -----------------------------
+    tg_id = user.tg_id
     reference = f"Оплата в Telegram | telegramId:{tg_id}; pay:{payment.id}"
     webhook_url = request.build_absolute_uri(reverse("mono_webhook"))
 
@@ -316,7 +360,6 @@ def payment_create(request):
         },
         status=status.HTTP_201_CREATED,
     )
-
 
 @api_view(["GET"])
 def payment_check(request):
@@ -371,16 +414,6 @@ def payment_check(request):
 
     else:
         logger.info("ℹ️ Refresh conditions not met")
-    from core.tasks import save_to_sheets_task
-
-    save_to_sheets_task.delay({
-        "tg_id": payment.user.tg_id,
-        "username": payment.user.username,
-        "full_name": payment.user.full_name,
-        "age": payment.user.age,
-        "phone": payment.user.phone,
-        "email": payment.user.email,
-    })
 
     return Response({
         "ok": True,
@@ -388,38 +421,77 @@ def payment_check(request):
     })
 
 
+
+
+
+
+
 @api_view(["GET"])
 def ticket_get(request):
     payment_id = request.query_params.get("payment_id")
     if not payment_id:
         return Response({"ok": False, "error": "payment_id required"}, status=400)
-    payment = get_object_or_404(Payment.objects.select_related("event", "user"), id=payment_id)
+
+    payment = get_object_or_404(
+        Payment.objects.select_related("event", "user"),
+        id=payment_id
+    )
+
     if payment.status != "success":
         return Response({"ok": False, "error": "Payment is not successful"}, status=400)
+
+    # 1) Якщо квиток уже є і зображення існує — віддаємо одразу (ідемпотентність)
     ticket = Ticket.objects.filter(payment=payment).first()
     if ticket and ticket.image:
         return Response({"ok": True, "ticket": TicketSerializer(ticket, context={"request": request}).data})
+
+    # 2) Створюємо/оновлюємо Ticket атомарно + гарантуємо token
     try:
-        date_text = payment.event.start_at.strftime('%d.%m / %H:%M')
-        ticket, _ = Ticket.objects.get_or_create(
-            user=payment.user,
-            event=payment.event,
-            defaults={"payment": payment},
-        )
+        date_text = payment.event.start_at.strftime("%d.%m / %H:%M") if payment.event.start_at else ""
 
+        # Спробуємо кілька разів на випадок колізії токена (дуже малоймовірно, але safe)
+        for _ in range(3):
+            try:
+                with transaction.atomic():
+                    ticket = Ticket.objects.select_for_update().filter(payment=payment).first()
+
+                    if not ticket:
+                        # ✅ Створюємо квиток строго під цей payment (бо OneToOne)
+                        ticket = Ticket.objects.create(
+                            user=payment.user,
+                            event=payment.event,
+                            payment=payment,
+                            token=uuid.uuid4().hex,
+                        )
+                    else:
+                        # ✅ Якщо квиток існує, але token порожній — виправляємо
+                        if not ticket.token:
+                            ticket.token = uuid.uuid4().hex
+                            ticket.save(update_fields=["token"])
+
+                break
+            except IntegrityError:
+                # якщо раптом згенерився токен, який вже існує
+                continue
+        else:
+            return Response(
+                {"ok": False, "error": "ticket_generate_failed: IntegrityError: token collision"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # 3) Генерація зображення + збереження
         filename = generate_ticket(full_name=payment.user.full_name, date_text=date_text)
-
         ticket.image = f"tickets/{filename}"
         ticket.save(update_fields=["image"])
 
     except Exception as e:
+        logger.exception("ticket_get failed | payment_id=%s | %s", payment_id, e)
         return Response(
             {"ok": False, "error": f"ticket_generate_failed: {type(e).__name__}: {e}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     return Response({"ok": True, "ticket": TicketSerializer(ticket, context={"request": request}).data})
-
 
 @api_view(["GET"])
 def tickets_my(request):
@@ -624,32 +696,3 @@ def send_email_confirmation(request):
         return Response({"ok": False, "error": "server error"}, status=500)
 
 
-@api_view(["POST"])
-def send_paid_user_to_google_sheet(request):
-    user_tg_id = request.data.get("tg_id")
-    user_tg_id = '437304984'
-
-    if not user_tg_id:
-        return Response(
-            {"ok": False, "error": "user_tg_id is required"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    user = get_object_or_404(TgUser, tg_id=user_tg_id)
-    if not user:
-        return Response(
-            {"ok": False, "error": "user not found"},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-    from core.tasks import save_to_sheets_task
-    logger.info("send_paid_user_to_google_sheet | user_tg=%s | user_data={%s}", user_tg_id, user)
-
-    try:
-        resp = save_to_sheets_task(user)
-        if resp['status'] != 'success':
-            return Response(
-                {"ok": False, "error": "error while saving data to Google Sheets"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-    except Exception as e:
-        logger.exception("send_paid_user_to_google_sheet | error=%s", e)

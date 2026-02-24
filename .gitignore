@@ -2,3 +2,9 @@
 .env
 venv/
 celerybeat-schedule*
+creds/
+creds/creds_data.json
+# secrets
+.env
+creds/
+*.json
